@@ -13,6 +13,11 @@ uint32_t microsecond_timer_get(void) {
 #include "opendbc/safety/safety.h"
 #include "opendbc/safety/ignition.h"
 
+// test hook: the hondastepper signal reader for configurations the checked-in F-CAN map does not use
+uint32_t honda_stepper_get_signal_test(const CANPacket_t *msg, uint32_t start_bit, uint32_t size, bool big_endian) {
+  return honda_stepper_get_signal(msg, start_bit, size, big_endian);
+}
+
 void safety_tick_current_safety_config() {
   safety_tick(&current_safety_config);
 }

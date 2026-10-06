@@ -17,6 +17,7 @@ from opendbc.car.volkswagen.mqbcan import volkswagen_meb_alt_crc_checksum, volks
 from opendbc.car.tesla.teslacan import tesla_checksum
 from opendbc.car.body.bodycan import body_checksum
 from opendbc.car.psa.psacan import psa_checksum
+from opendbc.car.hondastepper.checksums import stepper_checksum
 
 
 class SignalType:
@@ -34,6 +35,7 @@ class SignalType:
   TESLA_CHECKSUM = 11
   PSA_CHECKSUM = 12
   VOLKSWAGEN_MLB_CHECKSUM = 13
+  STEPPER_SERVO_CHECKSUM = 14
 
 
 @dataclass
@@ -182,7 +184,7 @@ class ChecksumState:
 
 
 def get_checksum_state(dbc_name: str) -> ChecksumState | None:
-  if dbc_name.startswith(("honda_", "acura_")):
+  if dbc_name.startswith(("honda_", "acura_", "hondastepper_fcan")):
     return ChecksumState(SignalType.HONDA_CHECKSUM, honda_checksum)
   elif dbc_name.startswith(("toyota_", "lexus_")):
     return ChecksumState(SignalType.TOYOTA_CHECKSUM, toyota_checksum)
@@ -208,6 +210,8 @@ def get_checksum_state(dbc_name: str) -> ChecksumState | None:
     return ChecksumState(SignalType.TESLA_CHECKSUM, tesla_checksum, tesla_setup_signal)
   elif dbc_name.startswith("psa_"):
     return ChecksumState(SignalType.PSA_CHECKSUM, psa_checksum)
+  elif dbc_name.startswith("hondastepper_servo"):
+    return ChecksumState(SignalType.STEPPER_SERVO_CHECKSUM, stepper_checksum)
   return None
 
 

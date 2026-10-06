@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "setup": {},
+  "notes": "F-CAN map for the 2008-12 Honda Accord 2.4L. Until checked in the car this is comma's Honda Nidec message map, used as a starting guess. The car setup tool on the comma device checks it and saves the result to /data/hondastepper/config.json, which then replaces this file. Lane keeping is switched by the lift lever alone (the motor reporting or not), so the cruise MAIN button and the car's own cruise state aren't in the map. The actuator values assume the motor controller runs the StepperServoCAN firmware with its stock settings (gearbox 5.18 x 2 = 10.36, motor 39 Ncm at 1.3 A); a firmware built with other settings changes the real torque behind every limit here.",
+  "fcan": {
+    "messages": [
+      {
+        "name": "ENGINE_DATA",
+        "addr": "0x158",
+        "len": 8,
+        "freq": 100,
+        "checksum": "honda",
+        "counter": true
+      },
+      {
+        "name": "POWERTRAIN_DATA",
+        "addr": "0x17C",
+        "len": 8,
+        "freq": 100,
+        "checksum": "honda",
+        "counter": true
+      },
+      {
+        "name": "GEARBOX",
+        "addr": "0x1A3",
+        "len": 8,
+        "freq": 100,
+        "checksum": "honda",
+        "counter": true
+      },
+      {
+        "name": "SCM_BUTTONS",
+        "addr": "0x1A6",
+        "len": 8,
+        "freq": 25,
+        "checksum": "honda",
+        "counter": true
+      },
+      {
+        "name": "SCM_FEEDBACK",
+        "addr": "0x294",
+        "len": 8,
+        "freq": 10,
+        "checksum": "honda",
+        "counter": true
+      }
+    ],
+    "signals": {
+      "VEHICLE_SPEED": {
+        "message": "ENGINE_DATA",
+        "start_bit": 7,
+        "size": 16,
+        "byte_order": "big",
+        "factor": 0.01,
+        "unit": "kph"
+      },
+      "BRAKE_PRESSED": {
+        "message": "POWERTRAIN_DATA",
+        "start_bit": 53,
+        "size": 1,
+        "byte_order": "big"
+      },
+      "GAS_PEDAL": {
+        "message": "POWERTRAIN_DATA",
+        "start_bit": 7,
+        "size": 8,
+        "byte_order": "big"
+      },
+      "DOOR_OPEN": {
+        "message": "SCM_BUTTONS",
+        "start_bit": 63,
+        "size": 1,
+        "byte_order": "big"
+      },
+      "GEAR": {
+        "message": "GEARBOX",
+        "start_bit": 35,
+        "size": 4,
+        "byte_order": "big",
+        "values": {
+          "1": "P",
+          "2": "R",
+          "3": "N",
+          "4": "D",
+          "7": "L",
+          "10": "S"
+        }
+      },
+      "LEFT_BLINKER": {
+        "message": "SCM_FEEDBACK",
+        "start_bit": 5,
+        "size": 1,
+        "byte_order": "big"
+      },
+      "RIGHT_BLINKER": {
+        "message": "SCM_FEEDBACK",
+        "start_bit": 6,
+        "size": 1,
+        "byte_order": "big"
+      }
+    }
+  },
+  "actuator": {
+    "direction": 1,
+    "firmware_gearing_ratio": 10.363636,
+    "firmware_k_torque": 0.212132,
+    "mechanical_ratio": 10.368421,
+    "motor_k_torque": 0.208597,
+    "tracked_arc_deg": 71.5
+  },
+  "fingerprint": {}
+}

@@ -145,6 +145,7 @@ void set_heartbeat_engaged_mads(bool c);
 void mads_heartbeat_engaged_check(void);
 void set_steering_disengage(bool c);
 int get_gas_interceptor_prev(void);
+uint32_t honda_stepper_get_signal_test(const CANPacket_t *msg, uint32_t start_bit, uint32_t size, bool big_endian);
 """)
 
 class LibSafety:

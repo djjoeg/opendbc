@@ -1,0 +1,39 @@
+VERSION ""
+
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+
+BS_:
+
+BU_: EON EPAS
+
+CM_ "StepperServoCAN steering actuator (github.com/dzid26/StepperServoCAN), messages from ocelot_controls.dbc. 500 kbps, CHECKSUM = 8-bit folded sum of id and data bytes.";
+
+BO_ 558 STEERING_COMMAND: 5 EON
+ SG_ CHECKSUM : 0|8@1+ (1,0) [0|255] "" EPAS
+ SG_ COUNTER : 8|4@1+ (1,0) [0|15] "" EPAS
+ SG_ STEER_MODE : 12|2@1+ (1,0) [0|3] "" EPAS
+ SG_ STEER_ANGLE : 16|16@1- (0.125,0) [-4096|4095.875] "deg" EPAS
+ SG_ STEER_TORQUE : 32|8@1- (0.125,0) [-16|15.875] "Nm" EPAS
+
+BO_ 559 STEERING_STATUS: 8 EPAS
+ SG_ CHECKSUM : 0|8@1+ (1,0) [0|255] "" EON
+ SG_ COUNTER : 8|4@1+ (1,0) [0|15] "" EON
+ SG_ CONTROL_STATUS : 12|4@1+ (1,0) [0|15] "" EON
+ SG_ STEERING_TORQUE : 16|8@1- (0.125,0) [-16|15.875] "Nm" EON
+ SG_ STEERING_SPEED : 24|8@1- (0.015625,0) [-2|1.984375] "rev/s" EON
+ SG_ TEMPERATURE : 32|8@1+ (1,-60) [-60|195] "C" EON
+ SG_ STEERING_ANGLE : 40|16@1- (0.125,0) [-4096|4095.875] "deg" EON
+ SG_ DEBUG_STATES : 56|8@1+ (1,0) [0|255] "" EON
+
+CM_ SG_ 558 STEER_MODE "0 Off: driver disabled. 1 TorqueControl: apply STEER_TORQUE. 2 RelativeControl: unused. 3 SoftOff: ramp torque to zero, then stay off until Off is sent.";
+CM_ SG_ 559 STEERING_ANGLE "Angle from the motor encoder divided by the firmware gearing ratio, zero at power-up";
+CM_ SG_ 559 STEERING_TORQUE "Motor torque from the commanded current, at the firmware gearing ratio";
+CM_ SG_ 559 CONTROL_STATUS "bit0 enabled, bit1 sensored control, bit2 soft-off active (locked until Off), bit3 closed-loop mode";
+CM_ SG_ 559 DEBUG_STATES "bit0 driver enabled, bit5 command checksum error seen, bit6 motion task overrun, bit7 service task overrun";
+VAL_ 558 STEER_MODE 0 "Off" 1 "TorqueControl" 2 "RelativeControl" 3 "SoftOff" ;

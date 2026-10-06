@@ -4,6 +4,7 @@ from opendbc.car.chrysler.values import CAR as CHRYSLER
 from opendbc.car.gm.values import CAR as GM
 from opendbc.car.ford.values import CAR as FORD
 from opendbc.car.honda.values import CAR as HONDA
+from opendbc.car.hondastepper.values import CAR as HONDASTEPPER
 from opendbc.car.hyundai.values import CAR as HYUNDAI
 from opendbc.car.nissan.values import CAR as NISSAN
 from opendbc.car.mazda.values import CAR as MAZDA
@@ -21,6 +22,7 @@ from opendbc.car.mg.values import CAR as MG
 # FIXME: add routes for these cars
 non_tested_cars = [
   MOCK.MOCK,
+  HONDASTEPPER.HONDA_ACCORD_8G_STEPPER,  # community port, no public route yet
   GM.CADILLAC_ATS,
   GM.HOLDEN_ASTRA,
   GM.CHEVROLET_MALIBU,

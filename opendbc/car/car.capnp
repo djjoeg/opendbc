@@ -557,6 +557,9 @@ struct CarParams {
     steeringAngleDeadzoneDeg @5 :Float32;
     latAccelFactor @6 :Float32;
     latAccelOffset @7 :Float32;
+    # measure the car's actual curvature from the comma device's gyro (yaw rate / speed) above 2 m/s
+    # instead of from steeringAngleDeg. For cars whose steering angle is only known relative to a start point.
+    useYawRate @9 :Bool;
 
     deprecated :group {
       useSteeringAngle @0 :Bool;
@@ -652,6 +655,7 @@ struct CarParams {
     volvo @36;
     bmw @37;
     mg @38;
+    hondaStepper @39;
   }
 
   enum SteerControlType {

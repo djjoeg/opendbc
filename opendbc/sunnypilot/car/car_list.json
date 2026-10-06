@@ -993,6 +993,20 @@
     ],
     "package": "Driver Alert Package II"
   },
+  "Honda Accord 2008-12": {
+    "platform": "HONDA_ACCORD_8G_STEPPER",
+    "make": "Honda",
+    "brand": "hondastepper",
+    "model": "Accord",
+    "year": [
+      "2008",
+      "2009",
+      "2010",
+      "2011",
+      "2012"
+    ],
+    "package": "2.4L sedan with the add-on steering motor"
+  },
   "Honda Accord 2018-22": {
     "platform": "HONDA_ACCORD",
     "make": "Honda",

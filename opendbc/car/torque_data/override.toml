@@ -116,3 +116,7 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 # port extensions
 "HONDA_CLARITY" = [0.96, 0.4018518740819229, 0.19]
 "CHEVROLET_MALIBU_NON_ACC_9TH_GEN" = [1.85, 1.85, 0.075]
+
+# 2008-12 Accord steered by the add-on motor on the steering wheel teeth. Estimated, not measured:
+# full command (about 4 Nm at the steering wheel) taken as 1.5 m/s^2. The live torque learner refines these.
+"HONDA_ACCORD_8G_STEPPER" = [1.5, 1.5, 0.1]
