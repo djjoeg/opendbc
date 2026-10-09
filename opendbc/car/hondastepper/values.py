@@ -46,7 +46,9 @@ class CarControllerParams:
   STEER_DELTA_UP = 1        # per command: 6.25 Nm/s
   STEER_DELTA_DOWN = 2      # per command: 12.5 Nm/s
   STEER_ERROR_MAX = 8       # 1 Nm the command may run ahead of the torque the motor reports
-  STEER_MAX_WHEEL_NM = 4.0  # at the steering wheel; one hand overpowers this easily
+  # lane keeping's most at the steering wheel; one hand overpowers it easily. The car setup's grip test pushes with the
+  # most the motor's board gives (about 5.4 Nm), 1.41 times this, so passing it proves the motor gear stays in the teeth
+  STEER_MAX_WHEEL_NM = 3.85
   SAFETY_MAX_TORQUE = 47    # the panda's hard limit: 5.9 Nm in firmware units, 4.4 Nm at the steering wheel
   MOTOR_TIMEOUT_NS = 100_000_000  # treat the motor as gone (lift lever up) after 100 ms without status
   # lane keeping turns on after this many motor status messages without a 100 ms gap, each saying the motor's

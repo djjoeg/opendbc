@@ -177,7 +177,10 @@ class TestConfig(unittest.TestCase):
     self.assertAlmostEqual(a.torque_cmd_scale, 1.333, delta=0.005)
     # lane keeping's own most and the panda's limit, at the steering wheel
     params = CarControllerParams(None)
-    self.assertAlmostEqual(params.STEER_MAX * 0.125 / a.torque_cmd_scale, 4.03, delta=0.01)
+    self.assertEqual(params.STEER_MAX, 41)
+    self.assertAlmostEqual(params.STEER_MAX * 0.125 / a.torque_cmd_scale, 3.85, delta=0.01)
+    # the grip test's push (the board's 3.3 A) is at least 1.4 times lane keeping's most
+    self.assertGreaterEqual(3.3 * a.motor_k_torque * a.mechanical_ratio / (params.STEER_MAX * 0.125 / a.torque_cmd_scale), 1.4)
     self.assertAlmostEqual(CarControllerParams.SAFETY_MAX_TORQUE * 0.125 / a.torque_cmd_scale, 4.41, delta=0.01)
     self.assertAlmostEqual(a.angle_scale, a.firmware_gearing_ratio / a.mechanical_ratio)
 
