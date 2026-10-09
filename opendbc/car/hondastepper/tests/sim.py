@@ -134,6 +134,8 @@ FIRMWARE_RATIO = 10.363636     # gearing the motor firmware assumes
 PRINTED_RATIO = 197 / 19       # steering wheel teeth (counted as a full circle) / motor gear teeth
 TRACKED_ARC_DEG = TEETH_SETS[29]   # steering wheel turn the motor gear follows on the long teeth: teeth plus rolling band
 FREE_SPIN_FW_DEG_S = 360.0     # motor speed off the teeth while pushing, firmware degrees per second (an estimate)
+MOTOR_TOOTH_FW_DEG = 360.0 / 19 / FIRMWARE_RATIO   # one tooth of the motor gear, as the firmware reports angles
+BOARD_MAX_FW_NM = 3.3 * 0.212132 * FIRMWARE_RATIO  # the most the board pushes: its 3.3 A, in firmware torque
 
 
 class SimMotor:
@@ -141,6 +143,8 @@ class SimMotor:
   (0x22E) in torque mode turn the wheel while the motor gear is on the teeth; off them the motor spins freely in the
   direction it pushes. true_direction is +1 when positive firmware torque turns the wheel left. Starts powered with
   its controller running; lever() lifts and lowers it."""
+
+  SLIP_EVERY_S = 0.03
 
   def __init__(self, true_direction: int = 1, angle_scale: float = FIRMWARE_RATIO / PRINTED_RATIO, arc_deg: float = TRACKED_ARC_DEG):
     self.true_direction = true_direction
@@ -163,6 +167,12 @@ class SimMotor:
     self._status_t = 0.0
     self.boot_s = 0.05      # after power-up it reports this long before its controller runs (the firmware's start-up)
     self.running_t = 0.0    # when its controller runs
+    self.held = False       # the driver holds the steering wheel still: the motor's push doesn't turn it
+    # with the wheel held, a push stronger than this (firmware torque) makes the motor gear slip over the steering
+    # wheel teeth, one tooth every SLIP_EVERY_S
+    self.slip_fw_nm: float | None = None
+    self.slips = 0
+    self._slip_t = -1.0
 
   def lever(self, down: bool):
     """The lift lever, now. Down puts the motor gear on the teeth and powers the motor: it reports 10 ms later and
@@ -211,9 +221,16 @@ class SimMotor:
       if self.powered and self.last_cmd_t >= 0 and self.t - self.last_cmd_t > 0.06 and self.mode == 1:
         self.soft_off, self.mode, self.torque_fw = True, 3, 0.0
       pushing = self.powered and self.mode == 1 and self.torque_fw != 0
-      if pushing and self.in_teeth(self.wheel_deg):
+      torque = max(-BOARD_MAX_FW_NM, min(BOARD_MAX_FW_NM, self.torque_fw))
+      if pushing and self.in_teeth(self.wheel_deg) and self.held:
+        # the wheel doesn't turn; too hard a push makes the motor gear jump a tooth now and then
+        if self.slip_fw_nm is not None and abs(torque) > self.slip_fw_nm and self.t - self._slip_t >= self.SLIP_EVERY_S:
+          self.encoder_fw_deg += math.copysign(MOTOR_TOOTH_FW_DEG, torque)
+          self.slips += 1
+          self._slip_t = self.t
+      elif pushing and self.in_teeth(self.wheel_deg):
         # hydraulic steering at standstill: about 8 degrees per second per Nm at the wheel
-        self.turn_wheel(self.wheel_deg + self.true_direction * self.torque_fw * 8.0 * dt, steps=1)
+        self.turn_wheel(self.wheel_deg + self.true_direction * torque * 8.0 * dt, steps=1)
       elif pushing:
         # off the teeth nothing holds the motor gear back
         self.encoder_fw_deg += math.copysign(FREE_SPIN_FW_DEG_S * dt, self.torque_fw)

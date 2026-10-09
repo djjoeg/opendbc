@@ -44,7 +44,7 @@ class TestHondaStepperSafety(common.CarSafetyTest, common.MotorTorqueSteeringSaf
 
   MAX_RATE_UP = 2
   MAX_RATE_DOWN = 2
-  MAX_TORQUE_LOOKUP = [0], [36]
+  MAX_TORQUE_LOOKUP = [0], [47]
   MAX_RT_DELTA = 15
   MAX_TORQUE_ERROR = 8
   TORQUE_MEAS_TOLERANCE = 0

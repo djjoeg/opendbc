@@ -172,8 +172,13 @@ class TestConfig(unittest.TestCase):
 
   def test_scales(self):
     a = CONFIG.actuator
-    # the firmware default (5.18:1 gearbox x 2) with the 59 Ncm 2 A motor and the 197:19 printed gears stays within 5%
-    self.assertAlmostEqual(a.torque_cmd_scale, 1.0, delta=0.05)
+    # the firmware default (5.18:1 gearbox x 2, 39 Ncm 1.3 A motor) driving the 45 Ncm 2 A motor through the 197:19
+    # printed gears: the firmware needs 1.33 times the torque asked at the steering wheel
+    self.assertAlmostEqual(a.torque_cmd_scale, 1.333, delta=0.005)
+    # lane keeping's own most and the panda's limit, at the steering wheel
+    params = CarControllerParams(None)
+    self.assertAlmostEqual(params.STEER_MAX * 0.125 / a.torque_cmd_scale, 4.03, delta=0.01)
+    self.assertAlmostEqual(CarControllerParams.SAFETY_MAX_TORQUE * 0.125 / a.torque_cmd_scale, 4.41, delta=0.01)
     self.assertAlmostEqual(a.angle_scale, a.firmware_gearing_ratio / a.mechanical_ratio)
 
 

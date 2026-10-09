@@ -171,13 +171,14 @@ static void honda_stepper_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool honda_stepper_tx_hook(const CANPacket_t *msg) {
-  // units are 0.125 Nm at the motor firmware's gearing (about 1.03x the torque at the steering wheel)
+  // units are 0.125 Nm at the motor firmware's gearing: with the 45 Ncm motor and the printed gears, a unit is 0.094 Nm
+  // at the steering wheel (opendbc/car/hondastepper/config.json, torque_cmd_scale 1.33)
   const TorqueSteeringLimits HONDA_STEPPER_STEERING_LIMITS = {
-    .max_torque = 36,           // 4.5 Nm, openpilot itself stops at about 4.1
-    .max_rate_up = 2,           // per 20 ms command, 12.5 Nm/s (openpilot ramps at half that)
-    .max_rate_down = 2,         // 12.5 Nm/s
+    .max_torque = 47,           // 4.4 Nm at the steering wheel; openpilot itself stops at 43 (4.0 Nm)
+    .max_rate_up = 2,           // per 20 ms command (openpilot ramps at half that)
+    .max_rate_down = 2,
     .max_rt_delta = 15,         // openpilot's 1 unit per command is 13 per 250 ms, plus a buffer
-    .max_torque_error = 8,      // 1 Nm above what the motor reports
+    .max_torque_error = 8,      // 0.75 Nm at the steering wheel above what the motor reports
     .type = TorqueMotorLimited,
   };
 

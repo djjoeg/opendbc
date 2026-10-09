@@ -47,7 +47,7 @@ class CarControllerParams:
   STEER_DELTA_DOWN = 2      # per command: 12.5 Nm/s
   STEER_ERROR_MAX = 8       # 1 Nm the command may run ahead of the torque the motor reports
   STEER_MAX_WHEEL_NM = 4.0  # at the steering wheel; one hand overpowers this easily
-  SAFETY_MAX_TORQUE = 36    # the panda's hard limit, 4.5 Nm in firmware units
+  SAFETY_MAX_TORQUE = 47    # the panda's hard limit: 5.9 Nm in firmware units, 4.4 Nm at the steering wheel
   MOTOR_TIMEOUT_NS = 100_000_000  # treat the motor as gone (lift lever up) after 100 ms without status
   # lane keeping turns on after this many motor status messages without a 100 ms gap, each saying the motor's
   # controller runs: 2 s at 100 Hz. The panda's safety mode uses the same count (HONDA_STEPPER_LEVER_DOWN_MSGS).
