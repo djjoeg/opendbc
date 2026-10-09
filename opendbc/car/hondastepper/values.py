@@ -59,10 +59,11 @@ class CarControllerParams:
   # them and spins freely in the direction it pushes. On the teeth the motor turns only as fast as the steering
   # wheel, and lane keeping alone turns the wheel well under this rate. The motor is then kept off, silently, until
   # its gear is back on the teeth. Not measured on the car yet.
-  # Rates are steering wheel degrees per second as the motor reports them; frames are 10 ms status messages.
+  # Rates are steering wheel degrees per second, worked out from the motor's angle between two of its status
+  # messages (its speed field is 8 bits and wraps above 2 turns a second, which a spinning motor may well pass; the
+  # angle field only wraps after 11 turns, and that wrap is undone). Frames are 10 ms status messages.
   FREE_SPIN_RATE_DEG_S = 100.0     # turning this fast in the direction it pushes ...
   FREE_SPIN_FRAMES = 10            # ... for 0.1 s counts as free spin
-  FREE_SPIN_FIELD_LIMIT_DEG_S = 650.0  # the motor's speed field wraps above about 700: this fast while pushing counts too
   FREE_SPIN_REST_DEG_S = 10.0      # after the motor is turned off it coasts; under this rate ...
   FREE_SPIN_REST_FRAMES = 10       # ... for 0.1 s, it has stopped
   FREE_SPIN_SETTLE_MAX_FRAMES = 200   # stop waiting for it to stop after 2 s

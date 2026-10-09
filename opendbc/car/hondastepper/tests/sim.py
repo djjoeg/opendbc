@@ -155,6 +155,7 @@ class SimMotor:
     self.teeth_center_deg = 0.0          # wheel angle with the motor gear in the middle of the steering wheel teeth
     self.encoder_fw_deg = 0.0            # what the firmware reports
     self.speed_fw_deg_s = 0.0            # what the firmware reports as its speed, firmware degrees per second
+    self.free_spin_fw_deg_s = FREE_SPIN_FW_DEG_S   # how fast it spins off the teeth while pushing
     self.free_spin_deg = 0.0             # how far the motor has spun off the teeth, firmware degrees
     self.mode = 0
     self.torque_fw = 0.0
@@ -233,8 +234,8 @@ class SimMotor:
         self.turn_wheel(self.wheel_deg + self.true_direction * torque * 8.0 * dt, steps=1)
       elif pushing:
         # off the teeth nothing holds the motor gear back
-        self.encoder_fw_deg += math.copysign(FREE_SPIN_FW_DEG_S * dt, self.torque_fw)
-        self.free_spin_deg += FREE_SPIN_FW_DEG_S * dt
+        self.encoder_fw_deg += math.copysign(self.free_spin_fw_deg_s * dt, self.torque_fw)
+        self.free_spin_deg += self.free_spin_fw_deg_s * dt
       if self.powered and self.t >= self.next_t:
         frames.append((self.t, 0x22F, self._status()))
         self.next_t += 0.01
@@ -247,7 +248,7 @@ class SimMotor:
     self._status_encoder, self._status_t = self.encoder_fw_deg, self.t
     control_status = (1 | 2 if self.running() else 0) | (4 if self.soft_off else 0)
     torque = round(self.torque_fw / 0.125) if self.mode == 1 else 0
-    speed = max(-128, min(127, round(self.speed_fw_deg_s / 360.0 / 0.015625)))
+    speed = round(self.speed_fw_deg_s / 360.0 / 0.015625)   # cast to a signed byte, as the firmware does: wraps past 2 turns a second
     angle = round(self.encoder_fw_deg / 0.125)
     data = bytearray(8)
     data[1] = (self.counter & 0xF) | (control_status << 4)

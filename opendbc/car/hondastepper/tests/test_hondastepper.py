@@ -213,12 +213,18 @@ class HondaStepperHarness:
     self.nanos = 0
     self.fcan_values: dict[str, dict[str, float]] = {m: {} for m in cfg.messages}
     self.status = {"CONTROL_STATUS": 3, "STEERING_TORQUE": 0.0, "STEERING_ANGLE": 0.0, "STEERING_SPEED": 0.0}
+    self.motor_rev_s = 0.0     # how fast the motor really turns (firmware turns per second): its angle advances with it
     self.panda_passes = True   # the panda runs this car's safety mode and passes the motor commands on
     self.passed: list[CanData] = []
 
   def set(self, **signals):
     for name, value in signals.items():
       self.fcan_values[self.cfg.signals[name].message][name] = value
+
+  def turning(self, rev_s: float):
+    """The motor turns this fast from now on (firmware turns per second). Its angle advances with every status
+    message, and its speed field reads what the firmware would put there: 8 bits that wrap above 2 turns a second."""
+    self.motor_rev_s = rev_s
 
   def step(self, motor: bool = True, CC=None, motor_frames=None, stall: bool = False):
     """One 10 ms step. The motor status comes from self.status, or from motor_frames (a simulated motor) when given.
@@ -228,6 +234,8 @@ class HondaStepperHarness:
     if motor_frames is not None:
       frames += [CanData(addr, dat, 1) for _, addr, dat in motor_frames]
     elif motor:
+      self.status["STEERING_ANGLE"] += self.motor_rev_s * 360.0 * DT_CTRL
+      self.status["STEERING_SPEED"] = wrapped_speed_field(self.motor_rev_s)
       frames.append(CanData(*self.servo.make_can_msg("STEERING_STATUS", 1, self.status)))
     frames += [CanData(addr, dat, CanBus.SERVO_SENT) for addr, dat, _ in self.passed]
     self.passed = []
@@ -239,6 +247,13 @@ class HondaStepperHarness:
       if self.panda_passes:
         self.passed = list(sends)
     return CS, sends
+
+
+def wrapped_speed_field(rev_s: float) -> float:
+  """STEERING_SPEED as the firmware writes it: the value in 1/64 turn per second cast to a signed byte, so anything
+  past 2 turns a second wraps round."""
+  raw = int(rev_s / 0.015625)
+  return ((raw + 128) % 256 - 128) * 0.015625
 
 
 # The motor's first message makes the car port send a command; the panda's report of it comes with the next
@@ -404,18 +419,20 @@ class TestCarState(unittest.TestCase):
   def test_free_spin_is_silent(self):
     p = CarControllerParams
     scale = CONFIG.actuator.angle_scale
-    fast = (p.FREE_SPIN_RATE_DEG_S + 30.0) / 360.0 / scale   # rev/s, as the motor reports it
+    fast = (p.FREE_SPIN_RATE_DEG_S + 30.0) / 360.0 / scale   # turns per second, as the motor counts them
     for direction in (1, -1):
       h = HondaStepperHarness(direction)
       # these are not free spin: turning against the push (the driver), slower than the limit, or not pushing at all
-      for torque, speed in ((1.0, -fast), (1.0, 0.5 * fast), (0.0, fast), (0.0, 1.9)):
-        h.status.update(STEERING_TORQUE=torque, STEERING_SPEED=speed)
+      for torque, rev_s in ((1.0, -fast), (1.0, 0.5 * fast), (0.0, fast), (0.0, 1.9)):
+        h.status.update(STEERING_TORQUE=torque)
+        h.turning(rev_s)
         for _ in range(3 * p.FREE_SPIN_FRAMES):
           CS, _ = h.step()
-        self.assertFalse(h.CI.CS.motor_free_spin, (direction, torque, speed))
-        self.assertFalse(CS.steeringPressed, (direction, torque, speed))
+        self.assertFalse(h.CI.CS.motor_free_spin, (direction, torque, rev_s))
+        self.assertFalse(CS.steeringPressed, (direction, torque, rev_s))
       # pushing and turning the same way fast, for 0.1 s
-      h.status.update(STEERING_TORQUE=-1.0, STEERING_SPEED=-fast)
+      h.status.update(STEERING_TORQUE=-1.0)
+      h.turning(-fast)
       for _ in range(p.FREE_SPIN_FRAMES - 1):
         CS, _ = h.step()
       self.assertFalse(CS.steeringPressed)
@@ -426,7 +443,8 @@ class TestCarState(unittest.TestCase):
       self.assertFalse(CS.steerFaultTemporary)
       # the motor is off and has stopped; as long as the steering wheel doesn't turn it, its gear is still off the
       # teeth and lane keeping holds back for the whole turn
-      h.status.update(STEERING_TORQUE=0.0, STEERING_SPEED=0.0, STEERING_ANGLE=40.0)
+      h.status.update(STEERING_TORQUE=0.0, STEERING_ANGLE=40.0)
+      h.turning(0.0)
       for _ in range(500):
         CS, _ = h.step()
         self.assertTrue(CS.steeringPressed)
@@ -440,33 +458,67 @@ class TestCarState(unittest.TestCase):
       self.assertFalse(CS.steeringPressed)
       self.assertFalse(h.CI.CS.motor_free_spin)
 
-  def test_free_spin_near_the_speed_field_limit(self):
-    # the motor's speed field wraps above about 2 rev/s, so a very fast motor can read as turning the other way
-    h = HondaStepperHarness()
-    h.status.update(STEERING_TORQUE=1.0, STEERING_SPEED=-1.9)
-    for _ in range(CarControllerParams.FREE_SPIN_FRAMES):
+  def test_free_spin_past_the_speed_field_limit(self):
+    # the motor's speed field wraps above 2 turns a second: a motor spinning at 2.8 reads as turning the other way
+    # at 1.2. The rate comes from the angle instead, so the spin is still caught
+    p = CarControllerParams
+    for rev_s in (2.8, 3.9, 1.0):
+      h = HondaStepperHarness()
+      h.status.update(STEERING_TORQUE=1.0)
+      h.turning(rev_s)
       CS, _ = h.step()
-    self.assertTrue(CS.steeringPressed)
+      if rev_s > 2.0:
+        self.assertLess(h.status["STEERING_SPEED"], 0.0, rev_s)   # what the field says
+      for _ in range(p.FREE_SPIN_FRAMES):
+        CS, _ = h.step()
+      self.assertTrue(CS.steeringPressed, rev_s)
+      self.assertAlmostEqual(h.CI.CS.motor_rate_fw, rev_s * 360.0, delta=15.0)
+
+  def test_motor_rate_from_the_angle(self):
+    # the rate is the angle between status messages over their time apart, the angle field's wrap undone, and it
+    # starts again from nothing each time the motor comes on
+    h = HondaStepperHarness()
+    h.turning(0.5)
+    for _ in range(3):
+      h.step()
+    self.assertAlmostEqual(h.CI.CS.motor_rate_fw, 180.0, delta=13.0)   # the angle field counts in 0.125 degrees
+    h.status["STEERING_ANGLE"] = 4095.0        # about to wrap round to -4096
+    h.step()
+    CS, _ = h.step()
+    self.assertAlmostEqual(h.CI.CS.motor_rate_fw, 180.0, delta=13.0)
+    self.assertLess(CS.steeringAngleDeg, 0.0)   # the field has wrapped; the rate hasn't noticed
+    for _ in range(12):
+      h.step(motor=False)                      # lift lever up
+    self.assertEqual(h.CI.CS.motor_rate_fw, 0.0)
+    h.status["STEERING_ANGLE"] = 0.0
+    h.step()                                   # the first message after power-up: no rate yet
+    self.assertEqual(h.CI.CS.motor_rate_fw, 0.0)
+    h.step()
+    self.assertAlmostEqual(h.CI.CS.motor_rate_fw, 180.0, delta=13.0)   # the angle field counts in 0.125 degrees
 
   def test_free_spin_retries_after_10_s_and_lever_up_resets(self):
     p = CarControllerParams
     h = HondaStepperHarness()
-    h.status.update(STEERING_TORQUE=1.0, STEERING_SPEED=1.0)
-    for _ in range(p.FREE_SPIN_FRAMES):
+    h.status.update(STEERING_TORQUE=1.0)
+    h.turning(1.0)
+    for _ in range(p.FREE_SPIN_FRAMES + 1):
       h.step()
     self.assertTrue(h.CI.CS.motor_free_spin)
-    h.status.update(STEERING_TORQUE=0.0, STEERING_SPEED=0.0)
+    h.status.update(STEERING_TORQUE=0.0)
+    h.turning(0.0)
     for _ in range(p.FREE_SPIN_REST_FRAMES + p.FREE_SPIN_RETRY_FRAMES + 2):
       CS, _ = h.step()
     self.assertFalse(CS.steeringPressed)   # nothing seen of the teeth for 10 s: lane keeping may try again
     # caught again, then the lift lever goes up and down: the gear was put back on the teeth by hand
-    h.status.update(STEERING_TORQUE=1.0, STEERING_SPEED=1.0)
-    for _ in range(p.FREE_SPIN_FRAMES):
+    h.status.update(STEERING_TORQUE=1.0)
+    h.turning(1.0)
+    for _ in range(p.FREE_SPIN_FRAMES + 1):
       h.step()
     self.assertTrue(h.CI.CS.motor_free_spin)
     for _ in range(12):
       h.step(motor=False)
-    h.status.update(STEERING_TORQUE=0.0, STEERING_SPEED=0.0)
+    h.status.update(STEERING_TORQUE=0.0)
+    h.turning(0.0)
     CS, _ = h.step()
     self.assertFalse(h.CI.CS.motor_free_spin)
     self.assertFalse(CS.steeringPressed)
@@ -583,9 +635,10 @@ class TestCarController(unittest.TestCase):
   def test_free_spin_turns_motor_off(self):
     h = HondaStepperHarness()
     p = CarControllerParams
-    h.status.update(STEERING_TORQUE=1.0, STEERING_SPEED=1.0)  # pushing left and spinning left at 360 degrees per second
+    h.status.update(STEERING_TORQUE=1.0)   # pushing left ...
+    h.turning(1.0)                         # ... and spinning left at 360 degrees per second
     cmds = []
-    for _ in range(p.FREE_SPIN_FRAMES + 2):
+    for _ in range(p.FREE_SPIN_FRAMES + 3):
       _, sends = h.step(CC=lat_active_cc(1.0))
       cmds += self._commands(sends)
     self.assertTrue(h.CI.CS.motor_free_spin)
@@ -658,6 +711,19 @@ class TestWithSimMotor(unittest.TestCase):
     self.assertEqual(motor.mode, StepperMode.TORQUE_CONTROL)
     self.assertEqual(motor.free_spin_deg, spun)
     self.assertGreater(motor.wheel_deg, motor.teeth_center_deg)
+
+  def test_a_fast_spin_is_caught_too(self):
+    # the motor spinning freely faster than its speed field can show (2 turns a second): the car port works the
+    # rate out from the angle, so it still catches the spin within about 0.1 s
+    for fw_deg_s in (1000.0, 1400.0):
+      h, motor = HondaStepperHarness(), SimMotor()
+      motor.free_spin_fw_deg_s = fw_deg_s
+      motor.wheel_deg = motor.teeth_center_deg + 50.0
+      states = self._run(h, motor, lat_active_cc(1.0), 0.5)
+      self.assertGreater(motor.free_spin_deg, 0.0)
+      self.assertLess(motor.free_spin_deg, 0.2 * fw_deg_s, fw_deg_s)
+      self.assertEqual(motor.mode, StepperMode.OFF)
+      self.assertTrue(states[-1].steeringPressed)
 
   def test_one_hold_per_turn_then_a_retry_after_10_s(self):
     h, motor = HondaStepperHarness(), SimMotor()

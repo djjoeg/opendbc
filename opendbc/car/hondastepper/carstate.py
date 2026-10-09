@@ -1,3 +1,4 @@
+import math
 from enum import IntEnum
 
 from opendbc.can import CANParser
@@ -12,6 +13,7 @@ ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 
 TORQUE_UNIT = 0.125      # Nm per STEERING_TORQUE / STEER_TORQUE bit
+ANGLE_WRAP_DEG = 8192.0  # STEERING_ANGLE is 16 bits of 0.125 degrees: it wraps round every 8192 firmware degrees
 BLINKER_HOLD_FRAMES = 50  # a flashing lamp reads as on for 0.5 s after each flash
 
 # CRUISE_BUTTONS values (Honda layout): 1 main, 2 cancel, 3 decel/set, 4 accel/resume
@@ -52,6 +54,9 @@ class CarState(CarStateBase):
     self.free_spin_rest_frames = 0
     self.free_spin_ref_angle = 0.0
     self.debug_states_logged = 0
+    self.angle_fw_prev: float | None = None   # the motor's angle and the time of its last message, for its rate
+    self.angle_ts_prev = 0
+    self.motor_rate_fw = 0.0      # firmware degrees per second, from the angle
 
     self.cruise_buttons = 0
 
@@ -120,8 +125,9 @@ class CarState(CarStateBase):
       self.debug_states_logged = sticky_warnings
 
     self.motor_torque_units = self.direction * round(status["STEERING_TORQUE"] / TORQUE_UNIT)
-    motor_rate = self.direction * status["STEERING_SPEED"] * 360.0 * self.angle_scale  # steering wheel deg/s
-    motor_angle = self.direction * status["STEERING_ANGLE"] * self.angle_scale        # steering wheel deg
+    self.update_motor_rate(status["STEERING_ANGLE"], len(control_statuses) > 0)
+    motor_rate = self.direction * self.motor_rate_fw * self.angle_scale        # steering wheel deg/s
+    motor_angle = self.direction * status["STEERING_ANGLE"] * self.angle_scale  # steering wheel deg
     self.update_free_spin(motor_rate, motor_angle)
     ret.steeringTorqueEps = self.direction * status["STEERING_TORQUE"] * self.torque_meas_scale
     ret.steeringTorque = 0.0       # no driver torque sensor on a hydraulic rack
@@ -165,6 +171,22 @@ class CarState(CarStateBase):
       self.lever_counting = self.lever_counting or command_passed
     self.lever_down = self.motor_status_msgs >= p.LEVER_DOWN_MSGS
 
+  def update_motor_rate(self, angle_fw: float, new_message: bool) -> None:
+    """The motor's rate (firmware degrees per second) from its angle between two of its status messages. The
+    status's own speed field is 8 bits, 2 turns a second at most, and wraps past that, so a motor spinning freely
+    could read as turning slowly the other way. The angle field wraps every 8192 degrees; that is undone here."""
+    if not self.motor_present:
+      self.angle_fw_prev, self.motor_rate_fw = None, 0.0
+      return
+    if not new_message:
+      return
+    if self.angle_fw_prev is not None and self.motor_last_nanos > self.angle_ts_prev:
+      delta = angle_fw - self.angle_fw_prev
+      if abs(delta) > ANGLE_WRAP_DEG / 2:
+        delta -= math.copysign(ANGLE_WRAP_DEG, delta)
+      self.motor_rate_fw = delta / ((self.motor_last_nanos - self.angle_ts_prev) * 1e-9)
+    self.angle_fw_prev, self.angle_ts_prev = angle_fw, self.motor_last_nanos
+
   def update_free_spin(self, motor_rate: float, motor_angle: float) -> None:
     """The motor turning fast in the direction it pushes means its gear is off the steering wheel teeth (the wheel
     is turned past their end) and spinning freely. Then the motor is kept off, with no warning, until the gear is
@@ -181,8 +203,7 @@ class CarState(CarStateBase):
     self.free_spin_frames += 1
     if state == FreeSpin.NONE:
       pushing = self.motor_torque_units != 0
-      spinning = pushing and ((self.motor_torque_units * motor_rate > 0 and abs(motor_rate) > p.FREE_SPIN_RATE_DEG_S) or
-                              abs(motor_rate) > p.FREE_SPIN_FIELD_LIMIT_DEG_S)
+      spinning = pushing and self.motor_torque_units * motor_rate > 0 and abs(motor_rate) > p.FREE_SPIN_RATE_DEG_S
       if not spinning:
         self.free_spin_frames = 0
       elif self.free_spin_frames >= p.FREE_SPIN_FRAMES:
