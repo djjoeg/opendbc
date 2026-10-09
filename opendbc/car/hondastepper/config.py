@@ -113,6 +113,7 @@ class SignalDef:
 # short ones are for getting used to lane keeping: the motor pushes with its full strength only as far as the teeth
 # reach (past them, only weakly through the roller's grip on the band).
 TEETH_SETS = {15: 42.2, 29: 71.5}
+ROLL_PAST_TEETH_DEG = 6.5   # the flat of the rolling band past the last tooth, each side (the printed parts' design)
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,11 @@ class ActuatorConfig:
   def angle_scale(self) -> float:
     """Steering wheel degrees per firmware-reported degree."""
     return self.firmware_gearing_ratio / self.mechanical_ratio
+
+  @property
+  def full_push_reach_deg(self) -> float:
+    """How far from straight ahead, each way, the motor can push with its full strength: the last tooth."""
+    return self.tracked_arc_deg / 2.0 - ROLL_PAST_TEETH_DEG
 
 
 SETUP_STEPS = ("parked", "drive")  # the car setup tool's two checks, see openpilot/sunnypilot/hondastepper
