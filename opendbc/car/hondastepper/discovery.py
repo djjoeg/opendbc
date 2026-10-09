@@ -578,6 +578,165 @@ def check_speed(cfg: Config, frames: Sequence[Frame], gps: Sequence[tuple[float,
                   samples=len(pairs), signal_def=sig_def, message_def=message_def)
 
 
+# ********** steering angle on the car's network **********
+
+ANGLE_MIN_FREQ = 50           # a steering angle slower than this is too stale for the steering controller
+ANGLE_MIN_FRAMES = 20         # frames of a message during the motor's travel, for a fit
+ANGLE_MIN_R2 = 0.97
+ANGLE_MAX_DEG_PER_UNIT = 0.5  # coarser than this is no angle sensor
+ANGLE_REST_MAX_UNITS = 2      # how much the field may wander with the wheel still
+ANGLE_MIN_LOW_BYTES = 8       # distinct low bytes seen during a turn: fewer means a field read in the wrong byte order
+
+MotorSeries = Sequence[tuple[float, float]]   # (seconds, motor angle in firmware degrees)
+
+
+def nice_angle_factor(deg_per_unit: float) -> float:
+  """Snaps a fitted factor (steering wheel degrees per step, signed) to a round value within 2% of one."""
+  sign = -1.0 if deg_per_unit < 0 else 1.0
+  for nice in (0.1, 0.05, 0.02, 0.01, 0.0625, 0.03125, 0.015625, 0.125, 0.25, 0.5, 1 / 3, 0.2):
+    if abs(abs(deg_per_unit) / nice - 1) < 0.02:
+      return sign * nice
+  return round(deg_per_unit, 6)
+
+
+def _interp(series: MotorSeries, t: float) -> float | None:
+  """The motor's angle at time t, between its samples; None outside them."""
+  if not series or t < series[0][0] or t > series[-1][0]:
+    return None
+  lo, hi = 0, len(series) - 1
+  while hi - lo > 1:
+    mid = (lo + hi) // 2
+    if series[mid][0] <= t:
+      lo = mid
+    else:
+      hi = mid
+  (t0, a0), (t1, a1) = series[lo], series[hi]
+  return a0 if t1 == t0 else a0 + (a1 - a0) * (t - t0) / (t1 - t0)
+
+
+def _travel(series: MotorSeries, min_move_fw: float = 1.0) -> tuple[float, float] | None:
+  """When the motor was turning: from its first move to its last change. None if it never moved."""
+  if len(series) < 3:
+    return None
+  start = series[0][1]
+  first = next((t for t, a in series if abs(a - start) >= min_move_fw), None)
+  if first is None:
+    return None
+  end = series[-1][1]
+  last = next(t for t, a in reversed(series) if abs(a - end) >= 0.5)
+  return first - 0.2, last + 0.2
+
+
+def _fit_line(xy: Sequence[tuple[float, float]]) -> tuple[float, float, float]:
+  """Least squares y = a x + b. Returns (a, b, r2)."""
+  n = len(xy)
+  mx = sum(x for x, _ in xy) / n
+  my = sum(y for _, y in xy) / n
+  sxx = sum((x - mx) ** 2 for x, _ in xy)
+  if sxx <= 0:
+    return 0.0, my, 0.0
+  a = sum((x - mx) * (y - my) for x, y in xy) / sxx
+  b = my - a * mx
+  ss_tot = sum((y - my) ** 2 for _, y in xy)
+  ss_res = sum((y - a * x - b) ** 2 for x, y in xy)
+  return a, b, (1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+
+def _field_value(d: bytes, byte: int, big_endian: bool, signed: bool) -> int:
+  return int.from_bytes(d[byte:byte + 2], "big" if big_endian else "little", signed=signed)
+
+
+def find_angle_signal(cfg: Config, rest: Window, turns: Sequence[tuple[Window, MotorSeries]], stats: dict[int, MessageStats],
+                      angle_scale: float) -> Finding:
+  """Looks for the steering wheel's angle in the car's data: a 16-bit field that follows the motor's own angle while
+  the motor gear is on the steering wheel teeth, during the car setup's turns (the first turn is to the LEFT), and
+  holds still with the wheel still. turns: (the F-CAN frames during a turn, the motor's angle meanwhile), left turn
+  first. angle_scale: steering wheel degrees per firmware degree. The field's scale comes from the motor's travel,
+  and its sign from the left turn; the value with the wheel at rest reads 0."""
+  name = "STEER_ANGLE"
+  configured = cfg.signals[name] if cfg.has(name) else None
+  travels = [(frames, series, _travel(series)) for frames, series in turns]
+  if any(tr is None for _, _, tr in travels):
+    return Finding(name, False, "not looked for: the motor didn't report the wheel turning")
+  rest_groups = by_addr(rest)
+  best = None
+  slow = 0
+  for addr, s in sorted(stats.items()):
+    if s.length < 2:
+      continue
+    too_slow = nearest_standard_freq(s.freq) < ANGLE_MIN_FREQ
+    turn_frames = [[(t, d) for t, a, d in frames if a == addr and len(d) == s.length] for frames, _, _ in travels]
+    if any(len(tf) < ANGLE_MIN_FRAMES for tf in turn_frames):
+      continue
+    rest_frames = [d for _, a, d in rest_groups.get(addr, []) if len(d) == s.length]
+    last_byte = s.length - (2 if s.honda_integrity else 1)
+    for byte in range(last_byte - 1):
+      for big_endian in (True, False):
+        for signed in (True, False):
+          fits = []
+          for (_, series, (t0, t1)), tf in zip(travels, turn_frames, strict=True):
+            xy = []
+            for t, d in tf:
+              if t0 <= t <= t1:
+                m = _interp(series, t)
+                if m is not None:
+                  xy.append((m, float(_field_value(d, byte, big_endian, signed))))
+            if len(xy) < ANGLE_MIN_FRAMES:
+              break
+            # a 16-bit field read in the wrong byte order still follows the wheel, in jumps of 256: its low byte
+            # hardly changes. A real angle's low byte runs through many values during a turn
+            if len({int(v) & 0xFF for _, v in xy}) < ANGLE_MIN_LOW_BYTES:
+              break
+            a, b, r2 = _fit_line(xy)
+            if r2 < ANGLE_MIN_R2 or a == 0.0:
+              break
+            fits.append((a, b, r2, len(xy)))
+          if len(fits) != len(travels):
+            continue
+          slopes = [a for a, _, _, _ in fits]
+          if any(sl * slopes[0] <= 0 for sl in slopes) or max(slopes) / min(slopes) > 1.25 or min(slopes) / max(slopes) < 0.8:
+            continue
+          if rest_frames:
+            values = [_field_value(d, byte, big_endian, signed) for d in rest_frames]
+            if max(values) - min(values) > ANGLE_REST_MAX_UNITS:
+              continue
+          a = sum(slopes) / len(slopes)
+          if abs(angle_scale / a) > ANGLE_MAX_DEG_PER_UNIT:
+            continue
+          if too_slow:
+            slow += 1
+            continue
+          score = min(r2 for _, _, r2, _ in fits)
+          if best is None or score > best[0]:
+            best = (score, addr, byte, big_endian, signed, a)
+  if best is None:
+    detail = "not on the car's network (the motor's own angle is used; nothing to do)"
+    if slow:
+      detail = f"found only in a message that comes less than {ANGLE_MIN_FREQ} times a second, too slow to use; the motor's own angle is used"
+    return Finding(name, False, detail)
+  _, addr, byte, big_endian, signed, a = best
+  # the first turn is to the left, which openpilot counts as positive: the motor moved left by |its travel|
+  left_series = travels[0][1]
+  left_sign = 1.0 if left_series[-1][1] - left_series[0][1] > 0 else -1.0
+  factor = nice_angle_factor(left_sign * angle_scale / a)
+  rest_values = sorted(_field_value(d, byte, big_endian, signed) for _, _, d in rest_groups.get(addr, []) if len(d) == stats[addr].length)
+  rest_value = rest_values[len(rest_values) // 2] if rest_values else 0
+  offset = round(-factor * rest_value, 4)
+  start_bit = byte * 8 + 7 if big_endian else byte * 8
+  sig = {"message": "", "start_bit": start_bit, "size": 16, "byte_order": "big" if big_endian else "little", "signed": signed,
+         "factor": factor, "offset": offset, "unit": "deg"}
+  where = f"found (message {addr:#x}, byte {byte}, {abs(factor):g} degrees per step)"
+  if configured is not None and cfg.message_of(name).addr == addr and configured.start_bit == start_bit:
+    where = f"matches ({abs(factor):g} degrees per step)"
+  return _relocated(cfg, Finding(name, False, "follows the motor's angle while the gear is on the teeth"), addr, sig, stats, where)
+
+
+def angle_from_drive(cfg: Config, frames: Sequence[Frame]) -> list[tuple[float, float]]:
+  """(seconds, steering wheel degrees, left positive) from a drive's F-CAN frames, for the configured STEER_ANGLE."""
+  sig, msg = cfg.signals["STEER_ANGLE"], cfg.message_of("STEER_ANGLE")
+  return [(t, read_signal(d, sig)) for t, a, d in frames if a == msg.addr and len(d) == msg.length]
+
+
 # ********** motor and steering wheel teeth **********
 
 @dataclass
@@ -634,21 +793,15 @@ def motor_angle_fw(data: bytes) -> float:
   return int.from_bytes(data[5:7], "little", signed=True) * 0.125
 
 
-def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: Sequence[tuple[float, float, float]],
-                               direction: int, angle_scale: float, min_speed: float = 8.0, min_turn_deg_s: float = 2.0,
-                               min_steer_deg: float = 0.5, min_samples: int = 20) -> MotorCheck:
-  """Checks the saved motor direction against the car's own turning, with nothing from the person doing the setup.
-  During a drive with the lift lever down and lane keeping off, the motor's angle follows the steering wheel. When
-  the GPS course swings left, the steering wheel must be left of where it sits on straight road, and the saved
-  direction must make that read as left (positive).
-  motor: (seconds, motor angle in firmware degrees). headings: (seconds, GPS course in degrees clockwise from north,
-  speed m/s), good fixes only. Both on the same clock."""
-  if len(motor) < 1000:
-    return MotorCheck(False, MSG_NO_MOTOR_IN_DRIVE, direction)
-  motor = sorted(motor)
-  times = [t for t, _ in motor]
-  wheel = [direction * a * angle_scale for _, a in motor]
-  centre = sorted(wheel)[len(wheel) // 2]   # where the steering wheel sits on straight road
+def steer_agrees_with_course(wheel: Sequence[tuple[float, float]], headings: Sequence[tuple[float, float, float]],
+                             min_speed: float = 8.0, min_turn_deg_s: float = 2.0, min_steer_deg: float = 0.5) -> tuple[int, int]:
+  """How often a steering wheel angle reading (seconds, degrees, left positive; its zero needn't be straight ahead)
+  was on the same side as the car's turning, from the GPS course: (agreeing moments, turning moments).
+  headings: (seconds, GPS course in degrees clockwise from north, speed m/s), good fixes only, on the same clock."""
+  wheel = sorted(wheel)
+  times = [t for t, _ in wheel]
+  angles = [a for _, a in wheel]
+  centre = sorted(angles)[len(angles) // 2]   # where the steering wheel sits on straight road
   agree = total = 0
   hs = sorted(headings)
   j = 0
@@ -664,11 +817,27 @@ def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: S
       j += 1
     if abs(times[j] - tm) > 0.5:
       continue
-    steer = wheel[j] - centre                           # left positive
+    steer = angles[j] - centre                          # left positive
     if abs(steer) < min_steer_deg:
       continue
     total += 1
     agree += 1 if steer * -turn > 0 else 0
+  return agree, total
+
+
+def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: Sequence[tuple[float, float, float]],
+                               direction: int, angle_scale: float, min_speed: float = 8.0, min_turn_deg_s: float = 2.0,
+                               min_steer_deg: float = 0.5, min_samples: int = 20) -> MotorCheck:
+  """Checks the saved motor direction against the car's own turning, with nothing from the person doing the setup.
+  During a drive with the lift lever down and lane keeping off, the motor's angle follows the steering wheel. When
+  the GPS course swings left, the steering wheel must be left of where it sits on straight road, and the saved
+  direction must make that read as left (positive).
+  motor: (seconds, motor angle in firmware degrees). headings: (seconds, GPS course in degrees clockwise from north,
+  speed m/s), good fixes only. Both on the same clock."""
+  if len(motor) < 1000:
+    return MotorCheck(False, MSG_NO_MOTOR_IN_DRIVE, direction)
+  agree, total = steer_agrees_with_course([(t, direction * a * angle_scale) for t, a in motor], headings, min_speed,
+                                          min_turn_deg_s, min_steer_deg)
   if total < min_samples:
     detail = f"too little turning to check the motor's direction ({total} turning moments, need {min_samples})"
     return MotorCheck(False, f"{detail}: include some curves or lane changes above {min_speed * 2.237:.0f} mph", direction)
@@ -681,6 +850,47 @@ def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: S
     return MotorCheck(False, f"{detail}: its saved direction is wrong. Run part 1 again", direction, wrong_way=True)
   detail = f"the steering wheel and the car's turning didn't line up clearly ({share:.0%} of {total})"
   return MotorCheck(False, f"{detail}: drive again with the lift lever down", direction)
+
+
+def angle_direction_from_drive(cfg: Config, frames: Sequence[Frame], headings: Sequence[tuple[float, float, float]],
+                               min_samples: int = 20) -> Finding:
+  """Checks the steering angle the car setup found on the car's network against the car's own turning over a drive.
+  ok: it reads left when the car turns left. Not ok: it reads backwards, or doesn't follow the car, or there wasn't
+  enough turning to tell; the drive check then drops it, and the motor's own angle is used."""
+  name = "STEER_ANGLE"
+  wheel = angle_from_drive(cfg, frames)
+  if len(wheel) < 500:
+    return Finding(name, False, "its message was hardly seen during the drive: dropped, the motor's own angle is used")
+  agree, total = steer_agrees_with_course(wheel, headings)
+  if total < min_samples:
+    detail = f"too little turning to check it ({total} turning moments, need {min_samples}): dropped, the motor's own angle is used"
+    return Finding(name, False, detail)
+  share = agree / total
+  if share >= 0.8:
+    return Finding(name, True, f"reads the same way as the car turned in {share:.0%} of {total} turning moments",
+                   signal_def=_signal_entry(cfg, name))
+  if share <= 0.2:
+    detail = f"reads the opposite way to how the car turned ({1 - share:.0%} of {total})"
+  else:
+    detail = f"doesn't follow the car's turning clearly ({share:.0%} of {total})"
+  return Finding(name, False, f"{detail}: dropped, the motor's own angle is used")
+
+
+def _signal_entry(cfg: Config, name: str) -> dict:
+  """The config's own entry for a signal, as it is written."""
+  sig = cfg.signals[name]
+  out = {"message": sig.message, "start_bit": sig.start_bit, "size": sig.size, "byte_order": "big" if sig.big_endian else "little"}
+  if sig.signed:
+    out["signed"] = True
+  if sig.factor != 1.0:
+    out["factor"] = sig.factor
+  if sig.offset != 0.0:
+    out["offset"] = sig.offset
+  if sig.unit:
+    out["unit"] = sig.unit
+  if sig.values:
+    out["values"] = {str(k): v for k, v in sig.values.items()}
+  return out
 
 
 # ********** writing the result **********

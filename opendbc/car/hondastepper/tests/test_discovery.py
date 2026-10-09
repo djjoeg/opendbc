@@ -314,3 +314,84 @@ class TestMotorChecks(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestAngleSearch(unittest.TestCase):
+  """The steering wheel's angle on the car's network, found from the car setup's turns."""
+
+  def _turns(self, car: SimCar, wheel):
+    """The setup's recordings: 3 s at rest, then a left turn and a right turn of the wheel, with the motor's angle
+    following the wheel over the teeth (the motor counts the other way, and stops once the gear runs off)."""
+    def motor_fw(deg):   # the motor's angle in firmware degrees: -1 direction, follows the wheel within +-35
+      return -max(-35.0, min(35.0, deg)) / 1.0
+    wheel.deg = 0.0
+    rest = car.run(3.0)
+    turns = []
+    for target in (45.0, -45.0):
+      frames, series = [], []
+      steps = 60
+      for i in range(steps + 1):
+        wheel.deg += (target - wheel.deg) / (steps - i) if i < steps else 0.0
+        frames += car.run(0.1)
+        series.append((car.t, motor_fw(wheel.deg)))
+      for _ in range(15):      # still for 1.5 s
+        frames += car.run(0.1)
+        series.append((car.t, motor_fw(wheel.deg)))
+      turns.append((frames, series))
+    return rest, turns
+
+  def _car(self, start_bit, factor, freq=100):
+    class Wheel:
+      deg = 0.0
+    wheel = Wheel()
+    layout = {**DEFAULT_LAYOUT, "STEER_ANGLE": (0x1C2, start_bit, 16)}
+    car = SimCar(layout=layout, messages={**MESSAGES, 0x1C2: (8, freq)}, wheel_deg_fn=lambda: wheel.deg, angle_factor_deg=factor)
+    return car, wheel
+
+  def _find(self, car, wheel):
+    rest, turns = self._turns(car, wheel)
+    stats = dsc.message_stats(car.history, car.t)
+    cfg = parse_config(json.load(open(CONFIG_PATH)))
+    return dsc.find_angle_signal(cfg, rest, turns, stats, 1.0)
+
+  def test_found_in_either_byte_order_and_sign(self):
+    # big-endian signed at byte 2 (Honda style, -0.1 a step), then an unsigned field counting up from 30000
+    car, wheel = self._car(23, -0.1)
+    f = self._find(car, wheel)
+    self.assertTrue(f.ok, f.detail)
+    self.assertEqual((f.signal_def["start_bit"], f.signal_def["byte_order"], f.signal_def["signed"]), (23, "big", True))
+    self.assertEqual(f.signal_def["factor"], -0.1)
+    self.assertEqual(f.message_def["freq"], 100)
+    car, wheel = self._car(7, 0.05)
+    car.wheel_deg_fn = lambda: wheel.deg + 1618.4   # the car's count sits at 32368 straight ahead and passes 32767: unsigned
+    f = self._find(car, wheel)
+    self.assertTrue(f.ok, f.detail)
+    self.assertEqual(f.signal_def["signed"], False)
+    self.assertEqual(f.signal_def["factor"], 0.05)
+    self.assertAlmostEqual(f.signal_def["offset"], -1618.4, delta=0.2)   # reads 0 at rest
+    # little-endian
+    car, wheel = self._car(7, -0.1)
+    car._frame_be = car._frame
+    car._frame = lambda addr: car._frame_be(addr) if addr != 0x1C2 else dsc.with_honda_checksum(
+      0x1C2, bytes([car._frame_be(0x1C2)[1], car._frame_be(0x1C2)[0]]) + car._frame_be(0x1C2)[2:], 0)
+    f = self._find(car, wheel)
+    self.assertTrue(f.ok, f.detail)
+    self.assertEqual((f.signal_def["start_bit"], f.signal_def["byte_order"]), (0, "little"))
+    self.assertEqual(f.signal_def["factor"], -0.1)
+
+  def test_nothing_else_matches(self):
+    car = SimCar()   # busy fields (engine speed, a rolling byte, noise), no angle
+
+    class Wheel:
+      deg = 0.0
+    f = self._find(car, Wheel())
+    self.assertFalse(f.ok)
+    self.assertIn("not on the car's network", f.detail)
+
+  def test_too_coarse_or_too_slow_is_rejected(self):
+    car, wheel = self._car(7, 1.0)      # a whole degree a step: no angle sensor
+    self.assertFalse(self._find(car, wheel).ok)
+    car, wheel = self._car(7, -0.1, freq=25)
+    f = self._find(car, wheel)
+    self.assertFalse(f.ok)
+    self.assertIn("less than 50 times a second", f.detail)

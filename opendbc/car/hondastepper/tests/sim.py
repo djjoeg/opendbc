@@ -45,13 +45,17 @@ class SimCar:
   layout positions, and some busy fields (engine speed, a rolling byte, a 1 Hz heartbeat bit) that change by themselves."""
 
   def __init__(self, layout=DEFAULT_LAYOUT, gears=DEFAULT_GEARS, speed_factor_kph=0.01, flashing_blinkers=True, messages=None,
-               copies=None):
+               copies=None, wheel_deg_fn=None, angle_factor_deg=-0.1):
     self.messages = messages or MESSAGES
     self.layout = layout
     self.copies = copies or {}   # name -> more places the car also sends that signal, like layout entries
     self.gears = gears
     self.speed_factor_kph = speed_factor_kph
     self.flashing_blinkers = flashing_blinkers
+    # a car that broadcasts its steering wheel angle (layout entry STEER_ANGLE, 16 bits): the wheel's angle in
+    # degrees, left positive, from wheel_deg_fn, at angle_factor_deg degrees per step (Honda: -0.1, signed)
+    self.wheel_deg_fn = wheel_deg_fn
+    self.angle_factor_deg = angle_factor_deg
     self.state = {"VEHICLE_SPEED": 0.0, "BRAKE_PRESSED": 0, "GAS_PEDAL": 0, "GEAR": "P", "DOOR_OPEN": 0,
                   "LEFT_BLINKER": 0, "RIGHT_BLINKER": 0}
     self.counters = dict.fromkeys(self.messages, 0)
@@ -61,6 +65,9 @@ class SimCar:
     self.history: list[dsc.Frame] = []
 
   def _value(self, name: str) -> int:
+    if name == "STEER_ANGLE":
+      deg = self.wheel_deg_fn() if self.wheel_deg_fn is not None else 0.0
+      return round(deg / self.angle_factor_deg)   # masked to its size by the caller: two's complement
     v = self.state[name]
     if name == "VEHICLE_SPEED":
       return round(v / self.speed_factor_kph)
@@ -174,6 +181,11 @@ class SimMotor:
     self.slip_fw_nm: float | None = None
     self.slips = 0
     self._slip_t = -1.0
+    self.plan: tuple[float, float] | None = None   # the driver turning the wheel over time: (target degrees, degrees per second)
+
+  def plan_turn(self, target_wheel_deg: float, deg_per_s: float = 15.0):
+    """The driver turns the wheel to this angle at this rate from now on, as the simulation advances."""
+    self.plan = (target_wheel_deg, deg_per_s)
 
   def lever(self, down: bool):
     """The lift lever, now. Down puts the motor gear on the teeth and powers the motor: it reports 10 ms later and
@@ -219,6 +231,12 @@ class SimMotor:
     frames = []
     while self.t < t:
       dt = 0.002
+      if self.plan is not None:
+        target, rate = self.plan
+        step = math.copysign(min(rate * dt, abs(target - self.wheel_deg)), target - self.wheel_deg)
+        self.turn_wheel(self.wheel_deg + step, steps=1)
+        if abs(target - self.wheel_deg) < 1e-9:
+          self.plan = None
       if self.powered and self.last_cmd_t >= 0 and self.t - self.last_cmd_t > 0.06 and self.mode == 1:
         self.soft_off, self.mode, self.torque_fw = True, 3, 0.0
       pushing = self.powered and self.mode == 1 and self.torque_fw != 0
