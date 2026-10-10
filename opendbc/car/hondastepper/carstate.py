@@ -1,4 +1,5 @@
 import math
+from collections import deque
 from enum import IntEnum
 
 from opendbc.can import CANParser
@@ -27,10 +28,22 @@ class FreeSpin(IntEnum):
   HOLD = 3      # back on the teeth; the motor stays off a little longer
 
 
+STANDSTILL_MPS = 0.3      # stand-alone: the comma device's own speed under this counts as stopped
+
+
 class CarState(CarStateBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
     self.cfg = CONFIG
+    self.car_network = CONFIG.car_network
+    # stand-alone: the comma device's own speed (m/s) and whether it can be used, handed in by openpilot's card before
+    # every update (set_device_speed). Until it is, there is no speed and the motor doesn't push.
+    self.device_speed = 0.0
+    self.device_speed_valid = False
+    # stand-alone: the driver turning the wheel against the motor; the motor lets go (CarControllerParams.OVERRIDE_*)
+    self.driver_override = False
+    self.override_frames = 0
+    self.override_window: deque[tuple[float, float]] = deque(maxlen=60)   # (steering wheel deg, motor torque units)
     self.direction = CONFIG.actuator.direction
     self.angle_scale = CONFIG.actuator.angle_scale
     self.torque_meas_scale = 1.0 / CONFIG.actuator.torque_cmd_scale
@@ -63,6 +76,12 @@ class CarState(CarStateBase):
   def _sig(self, cp: CANParser, name: str) -> float:
     return cp.vl[self.cfg.signals[name].message][name]
 
+  def set_device_speed(self, speed: float, valid: bool) -> None:
+    """Stand-alone: the comma device's own speed (m/s, already scaled to GPS by the drive check's result) and
+    whether it can be used now. openpilot's card calls this before every update."""
+    self.device_speed = max(float(speed), 0.0) if valid else 0.0
+    self.device_speed_valid = bool(valid)
+
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_servo = can_parsers[Bus.alt]
@@ -70,6 +89,77 @@ class CarState(CarStateBase):
     sigs = self.cfg.signals
     ret = structs.CarState()
 
+    if self.car_network:
+      self.update_car_data(ret, cp)
+    else:
+      # Stand-alone: nothing from the car. The speed is the comma device's own; the brake, gas, turn signals, gear
+      # and doors aren't known, so they read as released, off, drive and closed (the events they drive never come).
+      ret.vEgoRaw = self.device_speed
+      ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
+      ret.standstill = ret.vEgo < STANDSTILL_MPS
+      ret.gearShifter = GearShifter.drive
+
+    # ***** motor and the lift lever *****
+    status = cp_servo.vl[STEERING_STATUS]
+    control_statuses = cp_servo.vl_all[STEERING_STATUS]["CONTROL_STATUS"]
+    if len(control_statuses):
+      self.motor_last_nanos = cp_servo.ts_nanos[STEERING_STATUS]["CONTROL_STATUS"]
+    # The motor silent for 100 ms while the car's own messages keep coming: the lift lever is up (its power is cut)
+    # or the motor is unplugged. Timed against the car's messages like the panda does, so a hold-up in the comma
+    # device's own message handling can't look like a lifted lever. Stand-alone, against the comma device's CAN
+    # packets, which its panda daemon sends 100 times a second whether they hold any message or not; their times are
+    # when the daemon sent them, so a hold-up here doesn't count either.
+    clock_ns = cp.last_nonempty_nanos if self.car_network else cp_servo._last_update_nanos
+    silent_ns = clock_ns - self.motor_last_nanos
+    self.motor_present = self.motor_last_nanos > 0 and silent_ns < CarControllerParams.MOTOR_TIMEOUT_NS
+    self.update_lever(control_statuses, len(cp_sent.vl_all[STEERING_COMMAND]["COUNTER"]) > 0)
+    ret.cruiseState.available = self.lever_down
+    ret.cruiseState.enabled = False
+    control_status = StepperControlStatus(int(status["CONTROL_STATUS"]))
+    self.motor_soft_off = bool(control_status & StepperControlStatus.SOFT_OFF)
+    motor_ready = bool(control_status & StepperControlStatus.ENABLED)
+
+    debug_states = int(status["DEBUG_STATES"])
+    sticky_warnings = debug_states & (StepperDebugStates.CAN_RX_CHECKSUM_ERROR | StepperDebugStates.MOTION_TASK_OVERRUN |
+                                      StepperDebugStates.SERVICE_TASK_OVERRUN)
+    if self.motor_present and sticky_warnings and sticky_warnings != self.debug_states_logged:
+      carlog.warning(f"StepperServoCAN reports DEBUG_STATES {debug_states:#x} (sticky until the motor restarts)")
+      self.debug_states_logged = sticky_warnings
+
+    self.motor_torque_units = self.direction * round(status["STEERING_TORQUE"] / TORQUE_UNIT)
+    self.update_motor_rate(status["STEERING_ANGLE"], len(control_statuses) > 0)
+    motor_rate = self.direction * self.motor_rate_fw * self.angle_scale        # steering wheel deg/s
+    motor_angle = self.direction * status["STEERING_ANGLE"] * self.angle_scale  # steering wheel deg
+    self.update_free_spin(motor_rate, motor_angle)
+    if not self.car_network:
+      self.update_driver_override(cp_servo.vl_all[STEERING_STATUS]["STEERING_ANGLE"], cp_servo.vl_all[STEERING_STATUS]["STEERING_TORQUE"])
+    ret.steeringTorqueEps = self.direction * status["STEERING_TORQUE"] * self.torque_meas_scale
+    ret.steeringTorque = 0.0       # no driver torque sensor on a hydraulic rack
+    # The steering wheel turned past the end of the teeth is the driver steering: lane keeping holds back without a
+    # warning, and picks up again once the motor gear is back on the teeth. Stand-alone, so is the wheel turned
+    # against the motor.
+    ret.steeringPressed = self.motor_free_spin or self.driver_override
+    ret.steerFaultTemporary = not self.motor_present or not motor_ready or self.motor_soft_off
+    if not self.car_network and not self.device_speed_valid:
+      # no speed to steer by (the comma device's own estimate isn't ready, or disagrees with GPS)
+      ret.steerFaultTemporary = True
+    # Lifting the lift lever cuts the motor's power: lane keeping turns off with the normal disengage sound.
+    ret.steeringDisengage = not self.motor_present
+    ret.blockPcmEnable = not self.motor_present
+
+    # ***** steering angle *****
+    if self.car_network and "STEER_ANGLE" in sigs:
+      ret.steeringAngleDeg = self._sig(cp, "STEER_ANGLE")
+    else:
+      # motor encoder: zero is wherever the wheel was when the motor powered up (lift lever pushed down)
+      ret.steeringAngleDeg = motor_angle
+    ret.steeringRateDeg = motor_rate
+
+    return ret, structs.CarStateSP()
+
+  def update_car_data(self, ret: structs.CarState, cp: CANParser) -> None:
+    """Speed, pedals, gear, doors, turn signals and buttons from the car's F-CAN (car_network)."""
+    sigs = self.cfg.signals
     # ***** speed *****
     if self.cfg.has_wheel_speeds:
       self.parse_wheel_speeds(ret, self._sig(cp, "WHEEL_SPEED_FL"), self._sig(cp, "WHEEL_SPEED_FR"),
@@ -99,55 +189,6 @@ class CarState(CarStateBase):
       prev_cruise_buttons = self.cruise_buttons
       self.cruise_buttons = int(self._sig(cp, "CRUISE_BUTTONS"))
       ret.buttonEvents = create_button_events(self.cruise_buttons, prev_cruise_buttons, CRUISE_BUTTONS_DICT)
-
-    # ***** motor and the lift lever *****
-    status = cp_servo.vl[STEERING_STATUS]
-    control_statuses = cp_servo.vl_all[STEERING_STATUS]["CONTROL_STATUS"]
-    if len(control_statuses):
-      self.motor_last_nanos = cp_servo.ts_nanos[STEERING_STATUS]["CONTROL_STATUS"]
-    # The motor silent for 100 ms while the car's own messages keep coming: the lift lever is up (its power is cut)
-    # or the motor is unplugged. Timed against the car's messages like the panda does, so a hold-up in the comma
-    # device's own message handling can't look like a lifted lever.
-    silent_ns = cp.last_nonempty_nanos - self.motor_last_nanos
-    self.motor_present = self.motor_last_nanos > 0 and silent_ns < CarControllerParams.MOTOR_TIMEOUT_NS
-    self.update_lever(control_statuses, len(cp_sent.vl_all[STEERING_COMMAND]["COUNTER"]) > 0)
-    ret.cruiseState.available = self.lever_down
-    ret.cruiseState.enabled = False
-    control_status = StepperControlStatus(int(status["CONTROL_STATUS"]))
-    self.motor_soft_off = bool(control_status & StepperControlStatus.SOFT_OFF)
-    motor_ready = bool(control_status & StepperControlStatus.ENABLED)
-
-    debug_states = int(status["DEBUG_STATES"])
-    sticky_warnings = debug_states & (StepperDebugStates.CAN_RX_CHECKSUM_ERROR | StepperDebugStates.MOTION_TASK_OVERRUN |
-                                      StepperDebugStates.SERVICE_TASK_OVERRUN)
-    if self.motor_present and sticky_warnings and sticky_warnings != self.debug_states_logged:
-      carlog.warning(f"StepperServoCAN reports DEBUG_STATES {debug_states:#x} (sticky until the motor restarts)")
-      self.debug_states_logged = sticky_warnings
-
-    self.motor_torque_units = self.direction * round(status["STEERING_TORQUE"] / TORQUE_UNIT)
-    self.update_motor_rate(status["STEERING_ANGLE"], len(control_statuses) > 0)
-    motor_rate = self.direction * self.motor_rate_fw * self.angle_scale        # steering wheel deg/s
-    motor_angle = self.direction * status["STEERING_ANGLE"] * self.angle_scale  # steering wheel deg
-    self.update_free_spin(motor_rate, motor_angle)
-    ret.steeringTorqueEps = self.direction * status["STEERING_TORQUE"] * self.torque_meas_scale
-    ret.steeringTorque = 0.0       # no driver torque sensor on a hydraulic rack
-    # The steering wheel turned past the end of the teeth is the driver steering: lane keeping holds back without a
-    # warning, and picks up again once the motor gear is back on the teeth.
-    ret.steeringPressed = self.motor_free_spin
-    ret.steerFaultTemporary = not self.motor_present or not motor_ready or self.motor_soft_off
-    # Lifting the lift lever cuts the motor's power: lane keeping turns off with the normal disengage sound.
-    ret.steeringDisengage = not self.motor_present
-    ret.blockPcmEnable = not self.motor_present
-
-    # ***** steering angle *****
-    if "STEER_ANGLE" in sigs:
-      ret.steeringAngleDeg = self._sig(cp, "STEER_ANGLE")
-    else:
-      # motor encoder: zero is wherever the wheel was when the motor powered up (lift lever pushed down)
-      ret.steeringAngleDeg = motor_angle
-    ret.steeringRateDeg = motor_rate
-
-    return ret, structs.CarStateSP()
 
   def update_lever(self, control_statuses: list[float], command_passed: bool) -> None:
     """The lift lever is the lane keeping switch: on once the motor has reported for 2 s without a gap, every
@@ -226,9 +267,46 @@ class CarState(CarStateBase):
     self.free_spin_state = state
     self.motor_free_spin = state != FreeSpin.NONE
 
+  def update_driver_override(self, angles_fw: list[float], torques_nm: list[float]) -> None:
+    """Stand-alone: the driver turning the steering wheel against the motor (there are no turn signals or brake to
+    pause lane keeping). The motor pushing hard one way while the wheel turns the other way: the motor lets go, and
+    stays off until the wheel has been still for a while. Worked out per motor status message (10 ms) from the
+    wheel's travel over a window of them: the angle field's 0.125 degree step is too coarse for a rate from two
+    messages in a row."""
+    p = CarControllerParams
+    if not self.motor_present or self.motor_free_spin:
+      self.driver_override, self.override_frames = False, 0
+      self.override_window.clear()
+      return
+    max_units = p.STEER_MAX_WHEEL_NM * self.cfg.actuator.torque_cmd_scale / TORQUE_UNIT
+    for angle_fw, torque_nm in zip(angles_fw, torques_nm, strict=True):
+      angle = self.direction * angle_fw * self.angle_scale
+      torque = self.direction * torque_nm / TORQUE_UNIT       # CAN units, openpilot direction
+      self.override_window.append((angle, torque))
+      if not self.driver_override:
+        n = p.OVERRIDE_FRAMES
+        if len(self.override_window) <= n:
+          continue
+        recent = list(self.override_window)[-(n + 1):]
+        travel = recent[-1][0] - recent[0][0]                 # steering wheel degrees over n messages
+        pushes = [t for _, t in recent[1:]]
+        hard = all(abs(t) >= p.OVERRIDE_TORQUE_SHARE * max_units for t in pushes)
+        same_way = all(t > 0 for t in pushes) or all(t < 0 for t in pushes)
+        if hard and same_way and pushes[-1] * travel < 0 and abs(travel) > p.OVERRIDE_RATE_DEG_S * n * 0.01:
+          carlog.warning(f"hondastepper: the wheel turned {travel:.1f} deg against the motor in {n * 10} ms: the motor lets go")
+          self.driver_override, self.override_frames = True, 0
+      else:
+        n = p.OVERRIDE_STILL_WINDOW
+        window = list(self.override_window)[-(n + 1):]
+        still = len(window) > n and abs(window[-1][0] - window[0][0]) < p.OVERRIDE_STILL_DEG_S * n * 0.01
+        self.override_frames = self.override_frames + 1 if still else 0
+        if self.override_frames >= p.OVERRIDE_STILL_FRAMES:
+          self.driver_override, self.override_frames = False, 0
+
   @staticmethod
   def get_can_parsers(CP, CP_SP):
-    pt_messages = [(m.name, m.freq) for m in CONFIG.messages.values()]
+    # stand-alone: nothing is read from the car's network (an empty parser, always valid)
+    pt_messages = [(m.name, m.freq) for m in CONFIG.messages.values()] if CONFIG.car_network else []
     # NaN frequency: a missing motor status is normal (lift lever up), carstate tracks it instead of failing CAN validity
     servo_messages = [(STEERING_STATUS, float("nan"))]
     # openpilot's own motor commands as the panda passed them on: it reports every message it sends

@@ -10,8 +10,12 @@ from opendbc.car.hondastepper.config import DBC_NAME, SERVO_DBC_NAME, load_confi
 CONFIG, CONFIG_PROBLEM = load_config_or_default()
 
 
+# the panda safety mode's param: stand-alone, nothing read from the car (opendbc/safety/modes/honda_stepper.h)
+HONDA_STEPPER_PARAM_STANDALONE = 1
+
+
 class CanBus:
-  FCAN = 0   # car F-CAN through the harness CAN0 pair (OBD pins 6/14), listen only
+  FCAN = 0   # car F-CAN through the harness CAN0 pair (OBD pins 6/14), listen only; unused stand-alone
   SERVO = 1  # StepperServoCAN motor alone on the harness CAN1 pair
   SERVO_SENT = SERVO + 128  # openpilot's messages to the motor, reported back by the panda as it sends them
 
@@ -72,6 +76,19 @@ class CarControllerParams:
   FREE_SPIN_HOLD_FRAMES = 100      # the motor stays off for 1 s after that
   FREE_SPIN_RETRY_FRAMES = 1000    # with no sign of the teeth for 10 s, let lane keeping try again
 
+  # Stand-alone there are no turn signals or brake to pause lane keeping, so the motor lets go when the driver turns
+  # the wheel against it: the motor pushing hard one way (a share of lane keeping's most) while the steering wheel
+  # turns the other way faster than lane keeping lets it unwind. It stays off until the wheel has been still for a
+  # while (the driver has finished, or holds it), then lane keeping takes over again, its torque ramping up from zero.
+  # Not measured on the car yet: how fast the wheel unwinds by itself out of a curve against the motor sets how low
+  # these can go.
+  OVERRIDE_TORQUE_SHARE = 0.6      # the motor pushing at least this share of lane keeping's most, the same way, ...
+  OVERRIDE_RATE_DEG_S = 20.0       # ... while the steering wheel turns the other way faster than this on average ...
+  OVERRIDE_FRAMES = 20             # ... over 0.2 s (motor status messages): the driver is steering
+  OVERRIDE_STILL_DEG_S = 5.0       # then the motor stays off until the wheel turns slower than this on average ...
+  OVERRIDE_STILL_WINDOW = 50       # ... over 0.5 s ...
+  OVERRIDE_STILL_FRAMES = 150      # ... for 1.5 s in a row
+
   def __init__(self, CP):
     max_units = round(self.STEER_MAX_WHEEL_NM * CONFIG.actuator.torque_cmd_scale / 0.125)
     self.STEER_MAX = int(min(max_units, self.SAFETY_MAX_TORQUE))
@@ -80,6 +97,8 @@ class CarControllerParams:
 class HondaStepperFlags(IntFlag):
   # Absolute steering angle is broadcast on F-CAN (VSA). Otherwise the motor's encoder angle is used.
   FCAN_STEER_ANGLE = 1
+  # Not connected to the car: speed from the comma device itself (openpilot's card hands it to the car port)
+  STANDALONE = 2
 
 
 class CAR(Platforms):

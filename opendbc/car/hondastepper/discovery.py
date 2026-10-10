@@ -15,7 +15,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
-from opendbc.car.hondastepper.config import (BE_BITS, REQUIRED_SIGNALS, SAFETY_MIN_FREQ, SAFETY_OPTIONAL_SIGNALS, SAFETY_SIGNALS,
+from opendbc.car.hondastepper.config import (BE_BITS, DEVICE_SPEED_SCALE_RANGE, REQUIRED_SIGNALS, SAFETY_MIN_FREQ, SAFETY_OPTIONAL_SIGNALS, SAFETY_SIGNALS,
                                              SPEED_UNITS, Config, SignalDef)
 
 Frame = tuple[float, int, bytes]
@@ -491,6 +491,7 @@ class SpeedFit:
   samples: int = 0
   signal_def: dict | None = None    # replacement VEHICLE_SPEED entry when the configured one is wrong
   message_def: dict | None = None
+  scale: float = float("nan")       # stand-alone: GPS speed / the comma device's own speed, to save in the config
 
 
 def _pair_with_gps(frames: Sequence[Frame], gps: Sequence[tuple[float, float]], min_speed: float) -> list[tuple[bytes, float]]:
@@ -576,6 +577,34 @@ def check_speed(cfg: Config, frames: Sequence[Frame], gps: Sequence[tuple[float,
     sig_def["message"] = message_def["name"]
   return SpeedFit(True, f"{detail}; found the speed elsewhere (message {addr:#x}, byte {start_bit // 8}, {factor:g} kph per step)",
                   samples=len(pairs), signal_def=sig_def, message_def=message_def)
+
+
+DEVICE_SPEED_MIN_R2 = 0.95   # the comma device's own speed must follow the GPS speed this closely
+
+
+def check_device_speed(device: Sequence[tuple[float, float]], gps: Sequence[tuple[float, float]], min_speed: float = 5.0,
+                       min_samples: int = 60) -> SpeedFit:
+  """Stand-alone: compares the comma device's own speed (its estimate from the camera and motion sensors) with GPS
+  speed over a drive. It passes when they follow each other closely and differ by a steady factor inside
+  DEVICE_SPEED_SCALE_RANGE; that factor is saved, and the speed lane keeping uses is the device's own times it.
+  device, gps: (seconds, m/s) on the same clock, gps good fixes only."""
+  moving = [p for p in gps if p[1] >= min_speed]
+  if len(moving) < min_samples:
+    return SpeedFit(False, f"only {len(moving)} GPS readings above {min_speed * 2.237:.0f} mph; drive longer, where the comma device can see the sky")
+  frames = [(t, 0, v) for t, v in device]      # _pair_with_gps pairs by time; the "data" here is the speed itself
+  pairs = [(v_dev, v_gps) for v_dev, v_gps in _pair_with_gps(frames, gps, min_speed)]
+  if len(pairs) < min_samples:
+    return SpeedFit(False, f"the comma device's own speed was missing for most of the drive ({len(pairs)} readings next to GPS)")
+  k, r2 = _fit_through_zero(pairs)
+  lo, hi = DEVICE_SPEED_SCALE_RANGE
+  detail = f"the comma device's own speed reads {1 / k:.3f} times the GPS speed, and follows it {max(r2, 0.0):.0%} closely"
+  if r2 < DEVICE_SPEED_MIN_R2:
+    hint = f" (needs {DEVICE_SPEED_MIN_R2:.0%}): check the comma device sits firmly on its mount and can see the road"
+    return SpeedFit(False, detail + hint, 1 / k, len(pairs))
+  if not lo <= k <= hi:
+    return SpeedFit(False, detail + f": more than {round((hi - 1) * 100)}% off. Check the comma device's mount and calibration",
+                    1 / k, len(pairs))
+  return SpeedFit(True, detail + "; lane keeping uses it scaled to the GPS", 1 / k, len(pairs), scale=round(k, 4))
 
 
 # ********** steering angle on the car's network **********

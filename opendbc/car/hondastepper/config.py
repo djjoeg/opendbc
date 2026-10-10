@@ -146,6 +146,13 @@ class ActuatorConfig:
 SETUP_STEPS = ("parked", "drive")  # the car setup tool's two checks, see openpilot/sunnypilot/hondastepper
 
 
+# The comma device on its own, the default: not connected to the car's network at all. Speed comes from the comma
+# device's own estimate of its motion (camera and motion sensors), checked against GPS by the drive check, which saves
+# the GPS's verdict as a scale; the brake, gas, turn signals, gear and doors aren't known. car_network: true uses the
+# F-CAN map below instead, through the OBD port, as before.
+DEVICE_SPEED_SCALE_RANGE = (0.85, 1.15)
+
+
 @dataclass(frozen=True)
 class Config:
   setup: dict[str, str]  # setup check -> when it passed; written by the setup tools
@@ -153,10 +160,13 @@ class Config:
   signals: dict[str, SignalDef]
   actuator: ActuatorConfig
   fingerprint: dict[int, dict[int, int]]
+  car_network: bool = False        # read the car's F-CAN through the OBD port; False: stand-alone
+  device_speed_scale: float = 1.0  # stand-alone: GPS speed / the device's own speed, from the drive check
 
   @property
   def verified(self) -> bool:
-    """Both setup checks passed on this car: the F-CAN map and motor direction (parked) and the speed (drive)."""
+    """Both setup checks passed on this car: the motor (and with car_network the F-CAN map) parked, and the speed
+    and the motor's direction on a drive."""
     return all(self.setup.get(step) for step in SETUP_STEPS)
 
   def has(self, signal: str) -> bool:
@@ -292,7 +302,16 @@ def parse_config(raw: dict) -> Config:
   if not isinstance(setup, dict) or not set(setup) <= set(SETUP_STEPS) or not all(isinstance(v, str) for v in setup.values()):
     raise ConfigError(f"setup must map {SETUP_STEPS} to text")
 
-  return Config(setup=dict(setup), messages=messages, signals=signals, actuator=actuator, fingerprint=fingerprint)
+  car_network = raw.get("car_network", False)
+  if not isinstance(car_network, bool):
+    raise ConfigError("car_network must be true or false")
+  scale = raw.get("device_speed_scale", 1.0)
+  if isinstance(scale, bool) or not isinstance(scale, int | float) or not \
+     DEVICE_SPEED_SCALE_RANGE[0] <= float(scale) <= DEVICE_SPEED_SCALE_RANGE[1]:
+    raise ConfigError(f"device_speed_scale must be {DEVICE_SPEED_SCALE_RANGE[0]} to {DEVICE_SPEED_SCALE_RANGE[1]}")
+
+  return Config(setup=dict(setup), messages=messages, signals=signals, actuator=actuator, fingerprint=fingerprint,
+                car_network=car_network, device_speed_scale=float(scale))
 
 
 def device_config_path() -> str:

@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import random
 import unittest
 
 from opendbc.can import CANPacker
@@ -285,6 +286,44 @@ class TestSpeedCheck(unittest.TestCase):
     self.assertEqual(dsc.nice_factor(0.01004), 0.01)
     self.assertEqual(dsc.nice_factor(0.0161), 0.01 * 1.609344)
     self.assertEqual(dsc.nice_factor(0.0137), 0.0137)
+
+
+class TestDeviceSpeedCheck(unittest.TestCase):
+  """Stand-alone: the comma device's own speed (20 times a second) against GPS (2 times a second)."""
+
+  def _drive(self, device_scale: float = 1.0, noise: float = 0.2, gps_hz: float = 2.0, seconds: float = 120.0, seed: int = 1):
+    rng = random.Random(seed)
+    device, gps = [], []
+    for i in range(int(seconds * 20)):
+      t = i * 0.05
+      v = 8 + 10 * (0.5 + 0.5 * math.sin(t / 10))
+      device.append((t, v * device_scale + rng.gauss(0, noise)))
+      if i % int(20 / gps_hz) == 0:
+        gps.append((t, v))
+    return device, gps
+
+  def test_matching_speed_passes_with_its_scale(self):
+    for scale in (1.0, 0.95, 1.08):
+      with self.subTest(scale=scale):
+        fit = dsc.check_device_speed(*self._drive(device_scale=scale))
+        self.assertTrue(fit.ok, fit.detail)
+        self.assertAlmostEqual(fit.scale, 1 / scale, delta=0.01)
+
+  def test_far_off_or_noisy_speed_fails(self):
+    fit = dsc.check_device_speed(*self._drive(device_scale=1.3))
+    self.assertFalse(fit.ok)
+    self.assertIn("off", fit.detail)
+    fit = dsc.check_device_speed(*self._drive(noise=4.0))
+    self.assertFalse(fit.ok)
+    self.assertIn("follows it", fit.detail)
+
+  def test_not_enough_driving_or_no_device_speed(self):
+    device, gps = self._drive(seconds=20.0)
+    self.assertFalse(dsc.check_device_speed(device, gps).ok)
+    _, gps = self._drive()
+    fit = dsc.check_device_speed([], gps)
+    self.assertFalse(fit.ok)
+    self.assertIn("missing", fit.detail)
 
 
 class TestMotorChecks(unittest.TestCase):

@@ -4,7 +4,7 @@ import unittest
 
 import opendbc.safety.tests.common as common
 from opendbc.car.hondastepper.config import DBC_NAME, SERVO_DBC_NAME, load_config
-from opendbc.car.hondastepper.values import CarControllerParams
+from opendbc.car.hondastepper.values import HONDA_STEPPER_PARAM_STANDALONE, CarControllerParams
 from opendbc.car.hondastepper.discovery import with_honda_checksum
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.common import CANPackerSafety
@@ -330,6 +330,136 @@ class TestHondaStepperSafety(common.CarSafetyTest, common.MotorTorqueSteeringSaf
     msg = libsafety_py.make_CANPacket(0x100, 0, bytes([0x03, 0xC0, 0, 0, 0, 0, 0, 0]))
     self.assertEqual(0xF, self.safety.honda_stepper_get_signal_test(msg, 1, 4, True))
 
+
+class TestHondaStepperStandaloneSafety(common.SafetyTest, common.MotorTorqueSteeringSafetyTest):
+  """Stand-alone (the default): the comma device isn't connected to the car. Only the motor's status is checked and
+  nothing from bus 0 is read; the torque limits and the lift lever logic are the same."""
+  TX_MSGS = [[STEERING_COMMAND, SERVO_BUS]]
+  FWD_BUS_LOOKUP: dict[int, int] = {}
+  FWD_BLACKLISTED_ADDRS: dict[int, list[int]] = {}
+
+  MAX_RATE_UP = 2
+  MAX_RATE_DOWN = 2
+  MAX_TORQUE_LOOKUP = [0], [47]
+  MAX_RT_DELTA = 15
+  MAX_TORQUE_ERROR = 8
+  TORQUE_MEAS_TOLERANCE = 0
+
+  def setUp(self):
+    self.packer = CANPackerSafety(DBC_NAME)
+    self.servo_packer = CANPackerSafety(SERVO_DBC_NAME)
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaStepper, HONDA_STEPPER_PARAM_STANDALONE)
+    self.safety.init_tests()
+
+  def _torque_cmd_msg(self, torque, steer_req=1, mode=None, angle=0):
+    if mode is None:
+      mode = MODE_TORQUE if steer_req else MODE_OFF
+    values = {"STEER_MODE": mode, "STEER_TORQUE": torque * 0.125, "STEER_ANGLE": angle}
+    return self.servo_packer.make_can_msg_safety("STEERING_COMMAND", SERVO_BUS, values)
+
+  def _torque_meas_msg(self, torque, control_status=RUNNING):
+    values = {"STEERING_TORQUE": torque * 0.125, "CONTROL_STATUS": control_status}
+    return self.servo_packer.make_can_msg_safety("STEERING_STATUS", SERVO_BUS, values)
+
+  def _car_msg(self, **signals):
+    return self.packer.make_can_msg_safety(CONFIG.signals[next(iter(signals))].message, FCAN_BUS, signals)
+
+  def _speed_msg(self, speed):
+    # the car's speed message: stand-alone it is never read
+    return self._car_msg(VEHICLE_SPEED=speed * 3.6)
+
+  def _lever_setup(self):
+    self.safety.set_mads_params(True, False, False)
+    self.now = 0
+    self.safety.set_timer(0)
+
+  def _after(self, us):
+    self.now += us
+    self.safety.set_timer(self.now)
+
+  def _motor_status(self, n=1, control_status=RUNNING):
+    """n motor status messages 10 ms apart, nothing else on the network."""
+    for _ in range(n):
+      self._after(10_000)
+      self.assertTrue(self._rx(self._torque_meas_msg(0, control_status)))
+
+  def test_relay_malfunction(self):
+    # openpilot's motor command seen coming back on the motor's bus means the harness is wired wrong
+    for bus in range(3):
+      self.safety.set_relay_malfunction(False)
+      self._rx(common.make_msg(bus, STEERING_COMMAND, 8))
+      self.assertEqual(bus == SERVO_BUS, self.safety.get_relay_malfunction())
+
+  def test_the_cars_messages_are_ignored(self):
+    # a car message that does arrive (the OBD port plugged in after all) is never read: no brake, gas or speed here
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._car_msg(VEHICLE_SPEED=100.0))
+    self._rx(self._car_msg(BRAKE_PRESSED=1))
+    self._rx(self._car_msg(GAS_PEDAL=50))
+    self.assertFalse(self.safety.get_vehicle_moving())
+    self.assertFalse(self.safety.get_brake_pressed_prev())
+    self.assertFalse(self.safety.get_gas_pressed_prev())
+    rng = random.Random(0)
+    for _ in range(500):
+      msg = rng.choice(list(CONFIG.messages.values()))
+      self._rx(libsafety_py.make_CANPacket(msg.addr, FCAN_BUS, bytes(rng.randrange(256) for _ in range(msg.length))))
+      self.assertFalse(self.safety.get_controls_allowed_lateral())
+      self.assertFalse(self.safety.get_acc_main_on())
+
+  def test_only_the_motor_is_checked(self):
+    # with the motor reporting and nothing at all from the car, the rx checks are met
+    self._lever_setup()
+    self._motor_status(150)
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.safety_config_valid())
+
+  def test_lever_down_allows_steering_after_2_s(self):
+    self._lever_setup()
+    self._motor_status(LEVER_DOWN_MSGS - 1)
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._motor_status(1)
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._set_prev_torque(0)
+    self.assertTrue(self._tx(self._torque_cmd_msg(self.MAX_RATE_UP)))
+
+  def test_lever_up_ends_steering(self):
+    # lever up: nothing at all arrives. The 1 s rx check lag ends steering, and the motor's next message after the gap
+    # (lever down again) restarts the 2 s count
+    self._lever_setup()
+    self._motor_status(LEVER_DOWN_MSGS)
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._after(1_100_000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._set_prev_torque(0)
+    self.assertFalse(self._tx(self._torque_cmd_msg(self.MAX_RATE_UP)))
+    self._motor_status(1)
+    self.assertFalse(self.safety.get_acc_main_on())
+    self._motor_status(LEVER_DOWN_MSGS - 2)
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._motor_status(1)
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_motor_restart_ends_steering(self):
+    self._lever_setup()
+    self._motor_status(LEVER_DOWN_MSGS)
+    self._motor_status(1, control_status=0)
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  # the same commands and limits as connected to the car
+  test_torque_absolute_limits = TestHondaStepperSafety.test_torque_absolute_limits
+  test_only_torque_off_and_soft_off_modes = TestHondaStepperSafety.test_only_torque_off_and_soft_off_modes
+  test_torque_only_in_torque_mode = TestHondaStepperSafety.test_torque_only_in_torque_mode
+  test_angle_field_must_be_zero = TestHondaStepperSafety.test_angle_field_must_be_zero
+  test_off_allowed_without_controls = TestHondaStepperSafety.test_off_allowed_without_controls
+  test_lateral_only_allows_torque = TestHondaStepperSafety.test_lateral_only_allows_torque
+  test_nothing_sent_on_car_bus = TestHondaStepperSafety.test_nothing_sent_on_car_bus
+  test_motor_status_checksum = TestHondaStepperSafety.test_motor_status_checksum
+  test_motor_status_counter = TestHondaStepperSafety.test_motor_status_counter
 
 if __name__ == "__main__":
   unittest.main()

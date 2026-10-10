@@ -33,6 +33,10 @@ class CarController(CarControllerBase):
         # the motor gear is off the steering wheel teeth and spinning: let it stop (openpilot sees the driver steering)
         mode = StepperMode.OFF
         apply_torque = 0
+      elif CS.driver_override:
+        # stand-alone: the driver turned the wheel against the motor; let go until the wheel has been still a while
+        mode = StepperMode.OFF
+        apply_torque = 0
       elif CC.latActive:
         mode = StepperMode.TORQUE_CONTROL
         new_torque = int(round(actuators.torque * self.params.STEER_MAX))

@@ -27,9 +27,16 @@ def raw_default_config() -> dict:
     return json.load(f)
 
 
+def raw_car_network() -> dict:
+  """The default config reading the car's F-CAN through the OBD port (car_network) instead of stand-alone."""
+  raw = raw_default_config()
+  raw["car_network"] = True
+  return raw
+
+
 def raw_config_with_fcan_angle() -> dict:
   """The default map plus an F-CAN steering angle, laid out like comma's STEERING_SENSORS (0x156)."""
-  raw = raw_default_config()
+  raw = raw_car_network()
   raw["fcan"]["messages"].append({"name": "STEERING_SENSORS", "addr": "0x156", "len": 6, "freq": 100, "checksum": "honda", "counter": True})
   raw["fcan"]["signals"]["STEER_ANGLE"] = {"message": "STEERING_SENSORS", "start_bit": 7, "size": 16, "byte_order": "big",
                                            "signed": True, "factor": -0.1, "unit": "deg"}
@@ -39,10 +46,19 @@ def raw_config_with_fcan_angle() -> dict:
 def raw_config_with_cruise_buttons() -> dict:
   """The default map plus the cruise buttons at comma's Honda Nidec location. Supported, but not in the default
   config; they only ever give button events."""
-  raw = raw_default_config()
+  raw = raw_car_network()
   raw["fcan"]["signals"]["CRUISE_BUTTONS"] = {"message": "SCM_BUTTONS", "start_bit": 7, "size": 3, "byte_order": "big",
                                               "values": {"0": "none", "1": "main", "2": "cancel", "3": "decel_set", "4": "accel_res"}}
   return raw
+
+
+class CarNetworkTest(unittest.TestCase):
+  """These tests run the car port reading the car's F-CAN (car_network), the way it ran before stand-alone became
+  the default."""
+  def setUp(self):
+    stack = contextlib.ExitStack()
+    self.addCleanup(stack.close)
+    self.net_cfg, self.net_dbc = stack.enter_context(variant(raw_car_network()))
 
 
 @contextlib.contextmanager
@@ -269,7 +285,7 @@ def lat_active_cc(torque: float):
   return CC
 
 
-class TestCarState(unittest.TestCase):
+class TestCarState(CarNetworkTest):
   def test_basic_signals(self):
     h = HondaStepperHarness()
     h.set(VEHICLE_SPEED=72.0, BRAKE_PRESSED=1, GAS_PEDAL=20, GEAR=4, LEFT_BLINKER=1)
@@ -565,7 +581,7 @@ class TestInterface(unittest.TestCase):
     self.assertTrue(CP.dashcamOnly)
 
 
-class TestCarStateFcanAngle(unittest.TestCase):
+class TestCarStateFcanAngle(CarNetworkTest):
   def test_reads_fcan_angle(self):
     with variant(raw_config_with_fcan_angle()) as (cfg, dbc_path):
       h = HondaStepperHarness(fcan_dbc=dbc_path, cfg=cfg)
@@ -575,7 +591,7 @@ class TestCarStateFcanAngle(unittest.TestCase):
     self.assertAlmostEqual(CS.steeringAngleDeg, -12.3, places=3)
 
 
-class TestCarController(unittest.TestCase):
+class TestCarController(CarNetworkTest):
   def _commands(self, sends):
     out = []
     for addr, dat, bus in sends:
@@ -664,7 +680,7 @@ class TestCarController(unittest.TestCase):
       self.assertEqual(torques[-1], direction * 1)
 
 
-class TestWithSimMotor(unittest.TestCase):
+class TestWithSimMotor(CarNetworkTest):
   """The car port against the simulated motor: its status frames in, the car port's commands back to it."""
 
   def _run(self, h: HondaStepperHarness, motor: SimMotor, CC, seconds: float) -> list:
@@ -752,6 +768,151 @@ class TestWithSimMotor(unittest.TestCase):
     self.assertFalse(states[-1].steeringPressed)
     self.assertEqual(motor.free_spin_deg, 0.0)
 
+
+class TestStandalone(unittest.TestCase):
+  """The default: the comma device not connected to the car at all. Only the motor's messages reach it; its speed is
+  the comma device's own, handed to the car port by openpilot's card."""
+
+  def _step(self, h: HondaStepperHarness, speed: float = 20.0, valid: bool = True, fcan: bool = False, **kw):
+    h.CI.CS.set_device_speed(speed, valid)
+    if not fcan:
+      h.fcan_values = {}      # nothing from the car: only the motor's frames, or empty packets
+    return h.step(**kw)
+
+  def test_default_config_is_standalone(self):
+    self.assertFalse(CONFIG.car_network)
+    self.assertEqual(CONFIG.device_speed_scale, 1.0)
+    raw = raw_default_config()
+    for key, bad in (("car_network", "yes"), ("car_network", 1), ("device_speed_scale", 0.5), ("device_speed_scale", True),
+                     ("device_speed_scale", "1.0")):
+      with self.subTest(key=key, bad=bad), self.assertRaises(ConfigError):
+        parse_config({**raw, key: bad})
+    old = raw_default_config()
+    del old["car_network"], old["device_speed_scale"]
+    self.assertFalse(parse_config(old).car_network)   # a config saved before these keys existed is stand-alone
+
+  def test_interface_asks_the_panda_for_standalone(self):
+    CP = interfaces[PLATFORM].get_params(PLATFORM, gen_empty_fingerprint(), [], False, False, False)
+    self.assertEqual(CP.safetyConfigs[0].safetyParam, values_mod.HONDA_STEPPER_PARAM_STANDALONE)
+    self.assertTrue(CP.flags & HondaStepperFlags.STANDALONE)
+    self.assertTrue(CP.lateralTuning.torque.useYawRate)
+    # a steering angle found on the car's network earlier isn't used stand-alone
+    raw = raw_config_with_fcan_angle()
+    raw["car_network"] = False
+    with mock.patch.object(interface_mod, "CONFIG", parse_config(raw)):
+      CP = interfaces[PLATFORM].get_params(PLATFORM, gen_empty_fingerprint(), [], False, False, False)
+    self.assertFalse(CP.flags & HondaStepperFlags.FCAN_STEER_ANGLE)
+    self.assertTrue(CP.lateralTuning.torque.useYawRate)
+    with variant(raw_car_network()):
+      CP = interfaces[PLATFORM].get_params(PLATFORM, gen_empty_fingerprint(), [], False, False, False)
+    self.assertEqual(CP.safetyConfigs[0].safetyParam, 0)
+    self.assertFalse(CP.flags & HondaStepperFlags.STANDALONE)
+
+  def test_speed_is_the_devices_own(self):
+    h = HondaStepperHarness()
+    for _ in range(300):
+      CS, _ = self._step(h, speed=25.0)
+    self.assertAlmostEqual(CS.vEgoRaw, 25.0, places=3)
+    self.assertAlmostEqual(CS.vEgo, 25.0, places=1)
+    self.assertFalse(CS.standstill)
+    self.assertFalse(CS.steerFaultTemporary)
+    self.assertTrue(CS.canValid)
+    self.assertFalse(CS.canTimeout)
+    # the speed not usable (not ready yet, or disagreeing with GPS): no steering, as a temporary fault
+    CS, _ = self._step(h, speed=25.0, valid=False)
+    self.assertTrue(CS.steerFaultTemporary)
+    self.assertEqual(CS.vEgoRaw, 0.0)
+    for _ in range(300):
+      CS, _ = self._step(h, speed=0.0)
+    self.assertTrue(CS.standstill)
+
+  def test_the_cars_messages_are_ignored(self):
+    # a car message that happens to arrive (someone plugged into the OBD port) changes nothing
+    h = HondaStepperHarness()
+    h.set(VEHICLE_SPEED=72.0, BRAKE_PRESSED=1, GAS_PEDAL=20, GEAR=2, LEFT_BLINKER=1, DOOR_OPEN=1)
+    for _ in range(5):
+      CS, _ = self._step(h, speed=10.0, fcan=True)
+    self.assertAlmostEqual(CS.vEgoRaw, 10.0, places=3)
+    self.assertFalse(CS.brakePressed or CS.gasPressed or CS.leftBlinker or CS.doorOpen)
+    self.assertEqual(CS.gearShifter, structs.CarState.GearShifter.drive)
+
+  def test_lift_lever_with_nothing_else_on_the_network(self):
+    # lever up: the motor silent and every CAN packet empty. Off after 100 ms, timed against the packets.
+    h = HondaStepperHarness()
+    idle = structs.CarControl()
+    for _ in range(LEVER_ON_STEPS - 1):
+      CS, _ = self._step(h, CC=idle)
+      self.assertFalse(CS.cruiseState.available)
+    CS, _ = self._step(h, CC=idle)
+    self.assertTrue(CS.cruiseState.available)
+    for _ in range(9):
+      CS, _ = self._step(h, motor=False, CC=idle)
+    self.assertTrue(CS.cruiseState.available)          # under 100 ms
+    CS, _ = self._step(h, motor=False, CC=idle)
+    self.assertFalse(CS.cruiseState.available)
+    self.assertTrue(CS.steeringDisengage)
+    self.assertTrue(CS.canValid)                       # the lever up is no CAN fault
+
+  def test_a_hold_up_in_openpilot_is_not_a_lifted_lever(self):
+    h = HondaStepperHarness()
+    idle = structs.CarControl()
+    for _ in range(LEVER_ON_STEPS):
+      CS, _ = self._step(h, CC=idle)
+    for _ in range(30):
+      CS, _ = self._step(h, stall=True, CC=idle)
+    self.assertTrue(h.CI.CS.motor_present)
+    CS, _ = self._step(h, CC=idle)
+    self.assertTrue(CS.cruiseState.available)
+
+  def _override_run(self, h, torque_fw_nm: float, deg_per_step: float, steps: int, CC=None):
+    CC = CC or lat_active_cc(1.0)
+    h.status["STEERING_TORQUE"] = torque_fw_nm
+    out = []
+    for _ in range(steps):
+      h.status["STEERING_ANGLE"] += deg_per_step
+      out.append(self._step(h, CC=CC))
+    return out
+
+  def test_the_wheel_turned_against_the_motor_lets_it_go(self):
+    p = CarControllerParams
+    h = HondaStepperHarness()
+    self._override_run(h, 4.0, 0.0, 50)
+    # the motor pushes left (4 Nm in firmware units, over the share); the driver turns right at 30 deg/s
+    states = self._override_run(h, 4.0, -0.3, p.OVERRIDE_FRAMES + 2)
+    self.assertTrue(states[-1][0].steeringPressed)
+    self.assertTrue(h.CI.CS.driver_override)
+    sends = [snd for _, snd in states[-2:] for snd in snd]
+    self.assertTrue(all((dat[1] >> 4) & 0x3 == StepperMode.OFF for _, dat, _ in sends))
+    # the driver keeps turning, then holds the wheel: the motor stays off until it has been still for 1.5 s
+    self._override_run(h, 0.0, -0.3, 100)
+    still = self._override_run(h, 0.0, 0.0, p.OVERRIDE_STILL_FRAMES - 2)
+    self.assertTrue(all(cs.steeringPressed for cs, _ in still))
+    states = self._override_run(h, 0.0, 0.0, p.OVERRIDE_STILL_WINDOW + 5)   # the window clears of the last turning
+    self.assertFalse(states[-1][0].steeringPressed)
+    self.assertFalse(states[-1][0].steerFaultTemporary)   # no warning: lane keeping just picks up again
+
+  def test_normal_driving_is_no_override(self):
+    p = CarControllerParams
+    h = HondaStepperHarness()
+    cases = (
+      (4.0, 0.3, "the wheel turning the way the motor pushes"),
+      (4.0, -0.1, "the wheel unwinding slowly against it (10 deg/s)"),
+      (1.5, -0.5, "a light push with the wheel turning fast the other way"),
+    )
+    for torque, rate, what in cases:
+      with self.subTest(what):
+        h = HondaStepperHarness()
+        states = self._override_run(h, torque, rate, p.OVERRIDE_FRAMES * 5)
+        self.assertFalse(any(cs.steeringPressed for cs, _ in states))
+
+  def test_override_is_standalone_only(self):
+    with variant(raw_car_network()) as (cfg, dbc_path):
+      h = HondaStepperHarness(fcan_dbc=dbc_path, cfg=cfg)
+      h.status["STEERING_TORQUE"] = 4.0
+      for _ in range(60):
+        h.status["STEERING_ANGLE"] -= 0.3
+        CS, _ = h.step(CC=lat_active_cc(1.0))
+      self.assertFalse(CS.steeringPressed)
 
 if __name__ == "__main__":
   unittest.main()

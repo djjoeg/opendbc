@@ -3,7 +3,7 @@ from opendbc.car.carlog import carlog
 from opendbc.car.hondastepper.carcontroller import CarController
 from opendbc.car.hondastepper.carstate import CarState
 from opendbc.car.hondastepper.config import SETUP_STEPS, active_config_path, stale_files
-from opendbc.car.hondastepper.values import CONFIG, CONFIG_PROBLEM, HondaStepperFlags
+from opendbc.car.hondastepper.values import CONFIG, CONFIG_PROBLEM, HONDA_STEPPER_PARAM_STANDALONE, HondaStepperFlags
 from opendbc.car.interfaces import CarInterfaceBase
 
 # Without a steering angle from the car, lateral control works from the gyro, which is only good above walking pace
@@ -17,7 +17,12 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     ret.brand = "hondastepper"
-    ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaStepper)]
+    if CONFIG.car_network:
+      ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaStepper)]
+    else:
+      # stand-alone: the panda checks only the motor; openpilot's card hands the comma device's own speed to the car port
+      ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaStepper, HONDA_STEPPER_PARAM_STANDALONE)]
+      ret.flags |= HondaStepperFlags.STANDALONE.value
 
     # no radar, no openpilot gas or brake: speed stays with the driver or the stock cruise control
     ret.radarUnavailable = True
@@ -31,7 +36,7 @@ class CarInterface(CarInterfaceBase):
     ret.steerLimitTimer = 1.0
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
-    if CONFIG.has("STEER_ANGLE"):
+    if CONFIG.car_network and CONFIG.has("STEER_ANGLE"):
       ret.flags |= HondaStepperFlags.FCAN_STEER_ANGLE.value
     else:
       # The motor encoder only knows the angle relative to where the motor powered up, and loses count when the
@@ -43,9 +48,9 @@ class CarInterface(CarInterfaceBase):
     if not docs:
       if CONFIG_PROBLEM:
         carlog.error(f"hondastepper: {CONFIG_PROBLEM}. Lane keeping is off; run the car setup again.")
-      # Lane keeping stays off (openpilot only records) until the car setup tool has checked this car's map and the
-      # motor's direction, and the drive check has checked the speed and, against the GPS course, the motor's
-      # direction again. The drive check reads the CAN and GPS logs openpilot records meanwhile.
+      # Lane keeping stays off (openpilot only records) until the car setup tool has checked the motor's direction
+      # (and with car_network this car's map), and the drive check has checked the speed against GPS and, against
+      # the GPS course, the motor's direction again. The drive check reads the logs openpilot records meanwhile.
       if not CONFIG.verified:
         missing = [step for step in SETUP_STEPS if not CONFIG.setup.get(step)]
         carlog.error(f"hondastepper: setup checks not done yet: {missing}. Lane keeping is off until they pass.")

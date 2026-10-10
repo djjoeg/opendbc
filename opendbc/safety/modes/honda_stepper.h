@@ -15,6 +15,14 @@
 // main switch (acc_main_on). openpilot's car port (opendbc/car/hondastepper/carstate.py) counts the same messages the
 // same way, starting once this safety mode has passed one of its commands, so it turns on just after the panda does.
 // The cruise MAIN button and the car's own cruise control play no part.
+//
+// Stand-alone (the safety param's bit 0, the default build): the comma device isn't connected to the car at all. Only
+// the motor's status is checked; nothing is read from bus 0, so there is no brake or speed here, and the steering
+// limits and the lift lever logic above, which come from the motor, are the checks. With the motor silent (lever up)
+// no message arrives to run the rx hook, so the 1 s rx check lag (safety_tick) ends steering too; the motor itself has
+// no power then.
+
+#define HONDA_STEPPER_PARAM_STANDALONE 1U
 
 #define HONDA_STEPPER_FCAN_BUS 0U
 #define HONDA_STEPPER_SERVO_BUS 1U
@@ -37,6 +45,7 @@
 
 static uint32_t honda_stepper_status_ts = 0U;    // when the last STEERING_STATUS came
 static uint32_t honda_stepper_status_msgs = 0U;  // running STEERING_STATUS messages without a gap, up to LEVER_DOWN_MSGS
+static bool honda_stepper_standalone = false;    // nothing is read from the car's network
 
 // Reads an unsigned signal using DBC bit numbering, for both byte orders.
 // The rx hook only sees messages whose length matched an rx check, and config.py verified every
@@ -150,7 +159,7 @@ static void honda_stepper_rx_hook(const CANPacket_t *msg) {
   }
   honda_stepper_lever_update(status_received, motor_running);
 
-  if (msg->bus == HONDA_STEPPER_FCAN_BUS) {
+  if (!honda_stepper_standalone && (msg->bus == HONDA_STEPPER_FCAN_BUS)) {
     if (msg->addr == HONDA_STEPPER_SPEED_ADDR) {
       vehicle_moving = honda_stepper_get_signal(msg, HONDA_STEPPER_SPEED_START_BIT, HONDA_STEPPER_SPEED_SIZE,
                                                 HONDA_STEPPER_SPEED_BIG_ENDIAN) != 0U;
@@ -203,15 +212,23 @@ static safety_config honda_stepper_init(uint16_t param) {
     {HONDA_STEPPER_STEERING_COMMAND, HONDA_STEPPER_SERVO_BUS, HONDA_STEPPER_COMMAND_LEN, .check_relay = true},
   };
 
-  static RxCheck honda_stepper_rx_checks[] = {
-    HONDA_STEPPER_FCAN_RX_CHECKS
-    {.msg = {{HONDA_STEPPER_STEERING_STATUS, HONDA_STEPPER_SERVO_BUS, HONDA_STEPPER_STATUS_LEN, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-  };
-
-  SAFETY_UNUSED(param);
   honda_stepper_status_ts = 0U;
   honda_stepper_status_msgs = 0U;
-  safety_config ret = BUILD_SAFETY_CFG(honda_stepper_rx_checks, HONDA_STEPPER_TX_MSGS);
+  honda_stepper_standalone = GET_FLAG(param, HONDA_STEPPER_PARAM_STANDALONE);
+  safety_config ret;
+  if (honda_stepper_standalone) {
+    // stand-alone: the motor's status only
+    static RxCheck honda_stepper_standalone_rx_checks[] = {
+      {.msg = {{HONDA_STEPPER_STEERING_STATUS, HONDA_STEPPER_SERVO_BUS, HONDA_STEPPER_STATUS_LEN, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    };
+    ret = BUILD_SAFETY_CFG(honda_stepper_standalone_rx_checks, HONDA_STEPPER_TX_MSGS);
+  } else {
+    static RxCheck honda_stepper_rx_checks[] = {
+      HONDA_STEPPER_FCAN_RX_CHECKS
+      {.msg = {{HONDA_STEPPER_STEERING_STATUS, HONDA_STEPPER_SERVO_BUS, HONDA_STEPPER_STATUS_LEN, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    };
+    ret = BUILD_SAFETY_CFG(honda_stepper_rx_checks, HONDA_STEPPER_TX_MSGS);
+  }
   // nothing is forwarded: there is no camera or other module between the car and the motor
   ret.disable_forwarding = true;
   return ret;
