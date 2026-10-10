@@ -106,13 +106,19 @@ class SignalDef:
     return min(self.occupied_bits()) // 8
 
 
-# The two printed steering wheel teeth, by how far they reach each way from straight ahead (degrees of steering wheel
+# The printed steering wheel teeth, by how far they reach each way from straight ahead (degrees of steering wheel
 # turn): the steering wheel turn over which the motor gear turns with the wheel on each, end to end. That is the teeth
-# (16 teeth, 29.2 degrees; 32 teeth, 58.5 degrees) plus the flat of the rolling band past each end (6.5 degrees each
-# side); the roller follows the band a little way down its slope too, so a hand turn measures a few degrees more. The
-# short ones are for getting used to lane keeping: the motor pushes with its full strength only as far as the teeth
-# reach (past them, only weakly through the roller's grip on the band).
-TEETH_SETS = {15: 42.2, 29: 71.5}
+# (16 teeth, 29.2 degrees; 32 teeth, 58.5 degrees; the long back teeth, 42 teeth of a face gear, 91.1 degrees) plus
+# the flat of the rolling band past each end (6.5 degrees each side); the roller follows the band a little way down its
+# slope too, so a hand turn measures a few degrees more. The short ones are for getting used to lane keeping and for
+# the highway: the motor pushes with its full strength only as far as the teeth reach (past them, only weakly through
+# the roller's grip on the band). 15 also stands for the column mounts' ring teeth, which match the short teeth, and
+# the short back teeth (14 teeth of the face gear: 30.4 degrees, 43.4 tracked, so their reach reads 0.6 degrees short).
+TEETH_SETS = {15: 42.2, 29: 71.5, 45: 104.1}
+# Steering wheel teeth (as a full circle) over the motor gear's: 197 / 19 on top of the wheel and in the ring teeth,
+# 166 / 16 for the long back teeth (a 16-tooth motor gear on a 166-tooth face gear); 0.07% apart, so the short back
+# teeth's 15 takes 197 / 19 as well.
+MECHANICAL_RATIOS = {15: 197 / 19, 29: 197 / 19, 45: 166 / 16}
 ROLL_PAST_TEETH_DEG = 6.5   # the flat of the rolling band past the last tooth, each side (the printed parts' design)
 
 
@@ -121,7 +127,7 @@ class ActuatorConfig:
   direction: int
   firmware_gearing_ratio: float  # gearing the motor firmware was flashed with (StepperServoCAN default 5.18 * 2)
   firmware_k_torque: float       # Nm/A the firmware assumes for its motor
-  mechanical_ratio: float        # steering wheel teeth (as a full circle: 197) / teeth on the motor gear (19)
+  mechanical_ratio: float        # steering wheel teeth (as a full circle: 197) / teeth on the motor gear (19); see MECHANICAL_RATIOS
   motor_k_torque: float          # Nm/A of the motor actually fitted
   # steering wheel turn over which the motor gear turns with the wheel, end to end, for the steering wheel teeth
   # fitted (see TEETH_SETS); the car setup saves the one it was told is on
