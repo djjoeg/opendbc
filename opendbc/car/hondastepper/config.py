@@ -120,6 +120,11 @@ TEETH_SETS = {15: 42.2, 29: 71.5, 45: 104.1}
 # teeth's 15 takes 197 / 19 as well.
 MECHANICAL_RATIOS = {15: 197 / 19, 29: 197 / 19, 45: 166 / 16}
 ROLL_PAST_TEETH_DEG = 6.5   # the flat of the rolling band past the last tooth, each side (the printed parts' design)
+# The side-slide mount's motor gear has no roller (the gear's depth in the teeth is set by its slide, so nothing rides
+# on a band): the motor turns with the steering wheel over the teeth alone. Its teeth answer 15 (14 teeth of the face
+# gear, 15.2 degrees each way, so 30.4 tracked). The car setup tells the two kinds of 15 apart by how far the motor
+# turned with the wheel: 30 or so without a roller, 42 or so with one.
+NO_ROLLER_ARCS = {15: 30.4}
 
 
 @dataclass(frozen=True)
@@ -130,8 +135,11 @@ class ActuatorConfig:
   mechanical_ratio: float        # steering wheel teeth (as a full circle: 197) / teeth on the motor gear (19); see MECHANICAL_RATIOS
   motor_k_torque: float          # Nm/A of the motor actually fitted
   # steering wheel turn over which the motor gear turns with the wheel, end to end, for the steering wheel teeth
-  # fitted (see TEETH_SETS); the car setup saves the one it was told is on
+  # fitted (see TEETH_SETS and NO_ROLLER_ARCS); the car setup saves the one it found
   tracked_arc_deg: float = 71.5
+  # how much of that, each side, is the rolling band past the last tooth: ROLL_PAST_TEETH_DEG with a roller on the
+  # motor gear, 0 without (the side-slide mount)
+  roll_past_deg: float = ROLL_PAST_TEETH_DEG
 
   @property
   def torque_cmd_scale(self) -> float:
@@ -146,7 +154,7 @@ class ActuatorConfig:
   @property
   def full_push_reach_deg(self) -> float:
     """How far from straight ahead, each way, the motor can push with its full strength: the last tooth."""
-    return self.tracked_arc_deg / 2.0 - ROLL_PAST_TEETH_DEG
+    return self.tracked_arc_deg / 2.0 - self.roll_past_deg
 
 
 SETUP_STEPS = ("parked", "drive")  # the car setup tool's two checks, see openpilot/sunnypilot/hondastepper
@@ -289,7 +297,8 @@ def parse_config(raw: dict) -> Config:
   actuator = ActuatorConfig(direction=int(a["direction"]), firmware_gearing_ratio=float(a["firmware_gearing_ratio"]),
                             firmware_k_torque=float(a["firmware_k_torque"]), mechanical_ratio=float(a["mechanical_ratio"]),
                             motor_k_torque=float(a["motor_k_torque"]),
-                            tracked_arc_deg=float(a.get("tracked_arc_deg", ActuatorConfig.tracked_arc_deg)))
+                            tracked_arc_deg=float(a.get("tracked_arc_deg", ActuatorConfig.tracked_arc_deg)),
+                            roll_past_deg=float(a.get("roll_past_deg", ROLL_PAST_TEETH_DEG)))
   if actuator.direction not in (-1, 1):
     raise ConfigError("actuator.direction must be 1 or -1")
   for key in ("firmware_gearing_ratio", "firmware_k_torque", "mechanical_ratio", "motor_k_torque"):
@@ -298,6 +307,8 @@ def parse_config(raw: dict) -> Config:
       raise ConfigError(f"actuator.{key} must be positive")
   if not 10.0 <= actuator.tracked_arc_deg <= 360.0:
     raise ConfigError("actuator.tracked_arc_deg must be 10-360")
+  if not 0.0 <= actuator.roll_past_deg <= 15.0 or actuator.full_push_reach_deg < 5.0:
+    raise ConfigError("actuator.roll_past_deg must be 0-15 and leave the teeth at least 5 degrees each way")
   if not 0.5 < actuator.torque_cmd_scale < 2.0:
     raise ConfigError("actuator scales differ by more than 2x from the firmware; reflash the motor firmware instead")
 

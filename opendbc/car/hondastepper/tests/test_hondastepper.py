@@ -121,9 +121,20 @@ class TestConfig(unittest.TestCase):
       self._expect_error(lambda r, name=name: r["fcan"]["signals"].update(
         {name: {"message": "SCM_BUTTONS", "start_bit": 47, "size": 1, "byte_order": "big"}}))
     self._expect_error(lambda r: r["actuator"].update(tracked_arc_deg=5))
+    self._expect_error(lambda r: r["actuator"].update(roll_past_deg=-1))
+    self._expect_error(lambda r: r["actuator"].update(tracked_arc_deg=20, roll_past_deg=6.5))       # teeth only 3.5 each way
     self._expect_error(lambda r: r["fcan"]["messages"][1].update(freq=5))                        # brake too slow for the panda
     self._expect_error(lambda r: r.update(setup={"parked": True}))
     self._expect_error(lambda r: r.update(setup={"someday": "now"}))
+
+  def test_full_push_reach_with_and_without_a_roller(self):
+    cfg = parse_config(self.raw)
+    self.assertAlmostEqual(cfg.actuator.full_push_reach_deg, 71.5 / 2 - cfgmod.ROLL_PAST_TEETH_DEG)
+    raw = copy.deepcopy(self.raw)
+    raw["actuator"].pop("roll_past_deg")                       # configs saved before it existed: a roller
+    self.assertAlmostEqual(parse_config(raw).actuator.roll_past_deg, cfgmod.ROLL_PAST_TEETH_DEG)
+    raw["actuator"].update(tracked_arc_deg=cfgmod.NO_ROLLER_ARCS[15], roll_past_deg=0.0)   # the side-slide mount
+    self.assertAlmostEqual(parse_config(raw).actuator.full_push_reach_deg, cfgmod.NO_ROLLER_ARCS[15] / 2)
 
   def test_verified_needs_both_setup_checks(self):
     self.assertFalse(CONFIG.verified)  # the default in the code was never checked on the car

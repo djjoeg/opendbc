@@ -108,7 +108,8 @@
     "firmware_k_torque": 0.212132,
     "mechanical_ratio": 10.368421,
     "motor_k_torque": 0.159099,
-    "tracked_arc_deg": 71.5
+    "tracked_arc_deg": 71.5,
+    "roll_past_deg": 6.5
   },
   "fingerprint": {}
 }

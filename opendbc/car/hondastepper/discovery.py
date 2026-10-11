@@ -780,8 +780,9 @@ def motor_direction_from_turn(start_deg: float, left_deg: float, right_deg: floa
                               tracked_arc_deg: float, arc_tolerance: float = 0.35) -> MotorCheck:
   """The driver turned the steering wheel left until the motor gear ran off the end of the steering wheel teeth and
   stopped turning, then right past the middle to the other end. Inputs are the motor's reported angle
-  (STEERING_ANGLE) at the start and at each end. The motor turns with the wheel over the teeth and the rolling band
-  past each end (tracked_arc_deg), so the two ends are that far apart when the gearing settings are right.
+  (STEERING_ANGLE) at the start and at each end. The motor turns with the wheel over the teeth, and the rolling band
+  past each end when its gear has a roller (tracked_arc_deg), so the two ends are that far apart when the gearing
+  settings are right.
   openpilot counts a left turn as positive, so direction is the sign that makes left positive."""
   moved_left = left_deg - start_deg
   moved_right = right_deg - start_deg
@@ -791,7 +792,7 @@ def motor_direction_from_turn(start_deg: float, left_deg: float, right_deg: floa
     return MotorCheck(False, "the left and right turns moved the motor the same way; turn left first, then right")
   span = abs(left_deg - right_deg) * angle_scale
   if abs(span / tracked_arc_deg - 1) > arc_tolerance:
-    detail = f"the motor turned with the steering wheel for {span:.0f} degrees, but the teeth and their rolling band cover {tracked_arc_deg:.0f}"
+    detail = f"the motor turned with the steering wheel for {span:.0f} degrees, but the steering wheel teeth cover {tracked_arc_deg:.0f}"
     return MotorCheck(False, detail + "; the motor's gearing setting doesn't match the printed gears")
   direction = 1 if moved_left > 0 else -1
   setting = "normal" if direction == 1 else "reversed"
