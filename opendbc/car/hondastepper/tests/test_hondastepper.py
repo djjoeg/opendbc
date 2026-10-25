@@ -135,6 +135,12 @@ class TestConfig(unittest.TestCase):
     self.assertAlmostEqual(parse_config(raw).actuator.roll_past_deg, cfgmod.ROLL_PAST_TEETH_DEG)
     raw["actuator"].update(tracked_arc_deg=cfgmod.NO_ROLLER_ARCS[15], roll_past_deg=0.0)   # the side-slide mount
     self.assertAlmostEqual(parse_config(raw).actuator.full_push_reach_deg, cfgmod.NO_ROLLER_ARCS[15] / 2)
+    # its other two sets: straight roads (11) and winding roads (20), each a valid config on the face gear's ratio
+    for answer in (11, 20):
+      raw["actuator"].update(tracked_arc_deg=cfgmod.NO_ROLLER_ARCS[answer], roll_past_deg=0.0,
+                             mechanical_ratio=cfgmod.MECHANICAL_RATIOS[answer])
+      self.assertAlmostEqual(parse_config(raw).actuator.full_push_reach_deg, cfgmod.NO_ROLLER_ARCS[answer] / 2)
+    self.assertEqual(cfgmod.ALL_TEETH, (11, 15, 20, 29, 45))
 
   def test_verified_needs_both_setup_checks(self):
     self.assertFalse(CONFIG.verified)  # the default in the code was never checked on the car

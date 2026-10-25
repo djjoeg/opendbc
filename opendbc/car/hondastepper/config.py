@@ -116,15 +116,18 @@ class SignalDef:
 # the short back teeth (14 teeth of the face gear: 30.4 degrees, 43.4 tracked, so their reach reads 0.6 degrees short).
 TEETH_SETS = {15: 42.2, 29: 71.5, 45: 104.1}
 # Steering wheel teeth (as a full circle) over the motor gear's: 197 / 19 on top of the wheel and in the ring teeth,
-# 166 / 16 for the long back teeth (a 16-tooth motor gear on a 166-tooth face gear); 0.07% apart, so the short back
-# teeth's 15 takes 197 / 19 as well.
-MECHANICAL_RATIOS = {15: 197 / 19, 29: 197 / 19, 45: 166 / 16}
+# 166 / 16 for the back teeth and the side-slide mount's (a 16-tooth motor gear on a 166-tooth face gear); 0.07% apart,
+# so the short back teeth's 15 takes 197 / 19 as well.
+MECHANICAL_RATIOS = {11: 166 / 16, 15: 197 / 19, 20: 166 / 16, 29: 197 / 19, 45: 166 / 16}
 ROLL_PAST_TEETH_DEG = 6.5   # the flat of the rolling band past the last tooth, each side (the printed parts' design)
 # The side-slide mount's motor gear has no roller (the gear's depth in the teeth is set by its slide, so nothing rides
-# on a band): the motor turns with the steering wheel over the teeth alone. Its teeth answer 15 (14 teeth of the face
-# gear, 15.2 degrees each way, so 30.4 tracked). The car setup tells the two kinds of 15 apart by how far the motor
-# turned with the wheel: 30 or so without a roller, 42 or so with one.
-NO_ROLLER_ARCS = {15: 30.4}
+# on a band): the motor turns with the steering wheel over the teeth alone. Its teeth come in three sets, the same
+# piece with 10, 14 or 18 teeth of the face gear (2.169 degrees each): 10.8 degrees each way for straight roads
+# (answer 11; 21.7 tracked), 15.2 for the highway (answer 15, as the other short teeth; 30.4 tracked) and 19.5 for
+# winding roads (answer 20; 39.0 tracked). The car setup tells the two kinds of 15 apart by how far the motor turned
+# with the wheel: 30 or so without a roller, 42 or so with one.
+NO_ROLLER_ARCS = {11: 21.7, 15: 30.4, 20: 39.0}
+ALL_TEETH = tuple(sorted(set(TEETH_SETS) | set(NO_ROLLER_ARCS)))   # every answer to "which teeth are on"
 
 
 @dataclass(frozen=True)
