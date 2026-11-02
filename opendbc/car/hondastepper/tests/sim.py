@@ -182,6 +182,7 @@ class SimMotor:
     self.slips = 0
     self._slip_t = -1.0
     self.plan: tuple[float, float] | None = None   # the driver turning the wheel over time: (target degrees, degrees per second)
+    self.gear_in = True     # the motor slid up into the steering wheel teeth (False: slid back out, lane keeping off)
 
   def plan_turn(self, target_wheel_deg: float, deg_per_s: float = 15.0):
     """The driver turns the wheel to this angle at this rate from now on, as the simulation advances."""
@@ -205,7 +206,7 @@ class SimMotor:
     return self.powered and self.t >= self.running_t
 
   def in_teeth(self, wheel_deg: float) -> bool:
-    return abs(wheel_deg - self.teeth_center_deg) <= self.arc_deg / 2
+    return self.gear_in and abs(wheel_deg - self.teeth_center_deg) <= self.arc_deg / 2
 
   def turn_wheel(self, new_wheel_deg: float, steps: int = 50):
     """The driver turns the wheel; the encoder follows only while the motor gear is on the teeth (lift lever down)."""

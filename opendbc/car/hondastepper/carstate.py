@@ -22,10 +22,10 @@ CRUISE_BUTTONS_DICT = {1: ButtonType.mainCruise, 2: ButtonType.cancel, 3: Button
 
 
 class FreeSpin(IntEnum):
-  NONE = 0      # normal
+  NONE = 0      # normal: the motor gear is in the steering wheel teeth
   SETTLING = 1  # caught spinning: the motor is off and coasting to a stop
-  WAITING = 2   # stopped; waiting for the steering wheel to turn the motor again (gear back on the teeth)
-  HOLD = 3      # back on the teeth; the motor stays off a little longer
+  WAITING = 2   # stopped, or just switched on: waiting for the steering wheel to turn the motor (gear in the teeth)
+  HOLD = 3      # in the teeth; the motor stays off a little longer
 
 
 STANDSTILL_MPS = 0.3      # stand-alone: the comma device's own speed under this counts as stopped
@@ -61,11 +61,13 @@ class CarState(CarStateBase):
     self.lever_down = False       # the motor has reported for 2 s: lane keeping is on
     self.motor_soft_off = False
     self.motor_torque_units = 0   # STEERING_TORQUE in CAN units, openpilot direction (left positive)
-    self.motor_free_spin = False  # the motor gear came off the steering wheel teeth and spun; keep the motor off
-    self.free_spin_state = FreeSpin.NONE
+    # The motor gear isn't known to be in the steering wheel teeth until the wheel has turned the motor: keep the
+    # motor off till then (update_free_spin)
+    self.motor_free_spin = True
+    self.free_spin_state = FreeSpin.WAITING
     self.free_spin_frames = 0     # frames in a row of spinning (NONE), or frames spent in the current state
     self.free_spin_rest_frames = 0
-    self.free_spin_ref_angle = 0.0
+    self.free_spin_ref_angle: float | None = None
     self.debug_states_logged = 0
     self.angle_fw_prev: float | None = None   # the motor's angle and the time of its last message, for its rate
     self.angle_ts_prev = 0
@@ -143,7 +145,8 @@ class CarState(CarStateBase):
     if not self.car_network and not self.device_speed_valid:
       # no speed to steer by (the comma device's own estimate isn't ready, or disagrees with GPS)
       ret.steerFaultTemporary = True
-    # Lifting the lift lever cuts the motor's power: lane keeping turns off with the normal disengage sound.
+    # The motor losing power (the car switched off, or the lift lever lifted on the earlier mounts): lane keeping
+    # turns off with the normal disengage sound.
     ret.steeringDisengage = not self.motor_present
     ret.blockPcmEnable = not self.motor_present
 
@@ -151,7 +154,7 @@ class CarState(CarStateBase):
     if self.car_network and "STEER_ANGLE" in sigs:
       ret.steeringAngleDeg = self._sig(cp, "STEER_ANGLE")
     else:
-      # motor encoder: zero is wherever the wheel was when the motor powered up (lift lever pushed down)
+      # motor encoder: zero is wherever the wheel was when the motor powered up
       ret.steeringAngleDeg = motor_angle
     ret.steeringRateDeg = motor_rate
 
@@ -230,14 +233,20 @@ class CarState(CarStateBase):
 
   def update_free_spin(self, motor_rate: float, motor_angle: float) -> None:
     """The motor turning fast in the direction it pushes means its gear is off the steering wheel teeth (the wheel
-    is turned past their end) and spinning freely. Then the motor is kept off, with no warning, until the gear is
-    back on the teeth: the stopped motor starts turning again because the steering wheel turns it. One second later
-    lane keeping may steer again. This keeps the gear from running into the teeth while it spins."""
+    is turned past their end, or the motor was slid back out of them) and spinning freely. Then the motor is kept
+    off, with no warning, until the gear is back in the teeth: the stopped motor starts turning again because the
+    steering wheel turns it. One second later lane keeping may steer again. This keeps the gear from running into
+    the teeth while it spins.
+
+    The motor has power whenever the car is on, and the driver switches lane keeping on and off by sliding the motor
+    gear into and out of the teeth. So when the motor comes on, its gear isn't known to be in the teeth either: lane
+    keeping holds back the same way, silently, until the steering wheel has turned the motor. With the gear out it
+    never pushes; there are no retries to spin it."""
     p = CarControllerParams
     if not self.motor_present:
-      # lift lever up: when it goes down again the gear is put on the teeth by hand
-      self.free_spin_state, self.free_spin_frames = FreeSpin.NONE, 0
-      self.motor_free_spin = False
+      # no motor (car off, or unplugged): when it reports again, wait for the steering wheel to turn it
+      self.free_spin_state, self.free_spin_frames, self.free_spin_ref_angle = FreeSpin.WAITING, 0, None
+      self.motor_free_spin = True
       return
 
     state = self.free_spin_state
@@ -255,11 +264,10 @@ class CarState(CarStateBase):
       if self.free_spin_rest_frames >= p.FREE_SPIN_REST_FRAMES or self.free_spin_frames >= p.FREE_SPIN_SETTLE_MAX_FRAMES:
         state, self.free_spin_frames, self.free_spin_ref_angle = FreeSpin.WAITING, 0, motor_angle
     elif state == FreeSpin.WAITING:
-      if abs(motor_angle - self.free_spin_ref_angle) > p.FREE_SPIN_REMESH_DEG:
+      if self.free_spin_ref_angle is None:
+        self.free_spin_ref_angle = motor_angle      # the motor just came on: where it stands now
+      elif abs(motor_angle - self.free_spin_ref_angle) > p.FREE_SPIN_REMESH_DEG:
         state, self.free_spin_frames = FreeSpin.HOLD, 0
-      elif self.free_spin_frames >= p.FREE_SPIN_RETRY_FRAMES:
-        carlog.warning("hondastepper: no sign of the steering wheel teeth for 10 s, letting lane keeping try again")
-        state, self.free_spin_frames = FreeSpin.NONE, 0
     elif state == FreeSpin.HOLD:
       if self.free_spin_frames >= p.FREE_SPIN_HOLD_FRAMES:
         state, self.free_spin_frames = FreeSpin.NONE, 0

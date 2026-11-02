@@ -3,7 +3,7 @@
   "setup": {},
   "car_network": false,
   "device_speed_scale": 1.0,
-  "notes": "Stand-alone by default (car_network false): the comma device isn't connected to the car. Speed comes from the comma device's own estimate of its motion, scaled by device_speed_scale, which the car setup's drive check measures against GPS. With car_network true it reads the car's F-CAN through the OBD port instead, with the map below: until checked in the car that is comma's Honda Nidec message map, used as a starting guess, and the car setup tool checks it and saves the result to /data/hondastepper/config.json, which then replaces this file. Either way lane keeping is switched by the lift lever alone (the motor reporting or not), so the cruise MAIN button and the car's own cruise state aren't in the map. The actuator values assume the motor controller runs the StepperServoCAN firmware with its stock settings (gearbox 5.18 x 2 = 10.36, motor 39 Ncm at 1.3 A); a firmware built with other settings changes the real torque behind every limit here.",
+  "notes": "Stand-alone by default (car_network false): the comma device isn't connected to the car. Speed comes from the comma device's own estimate of its motion, scaled by device_speed_scale, which the car setup's drive check measures against GPS. With car_network true it reads the car's F-CAN through the OBD port instead, with the map below: until checked in the car that is comma's Honda Nidec message map, used as a starting guess, and the car setup tool checks it and saves the result to /data/hondastepper/config.json, which then replaces this file. Either way the cruise MAIN button and the car's own cruise state play no part: lane keeping is available while the motor reports (it has power whenever the car is on; the lift lever switched it on the earlier mounts), and pushes only while the motor gear is in the steering wheel teeth, which the motor's angle shows once the steering wheel turns it. The actuator values assume the motor controller runs the StepperServoCAN firmware with its stock settings (gearbox 5.18 x 2 = 10.36, motor 39 Ncm at 1.3 A); a firmware built with other settings changes the real torque behind every limit here. The motor fitted is the STEPPERONLINE 17HS15-1504S-X1, 45 Ncm at 1.5 A: motor_k_torque is 0.45 / 1.5 / sqrt(2), the same torque per amp as the firmware's own motor.",
   "fcan": {
     "messages": [
       {
@@ -107,7 +107,7 @@
     "firmware_gearing_ratio": 10.363636,
     "firmware_k_torque": 0.212132,
     "mechanical_ratio": 10.368421,
-    "motor_k_torque": 0.159099,
+    "motor_k_torque": 0.212132,
     "tracked_arc_deg": 71.5,
     "roll_past_deg": 6.5
   },

@@ -787,7 +787,7 @@ def motor_direction_from_turn(start_deg: float, left_deg: float, right_deg: floa
   moved_left = left_deg - start_deg
   moved_right = right_deg - start_deg
   if abs(moved_left) < 3.0 or abs(moved_right) < 3.0:
-    return MotorCheck(False, "the motor didn't report the wheel turning both ways; is the lift lever down, with the motor gear on the teeth?")
+    return MotorCheck(False, "the motor didn't report the wheel turning both ways; is its gear in the steering wheel teeth?")
   if moved_left * moved_right > 0:
     return MotorCheck(False, "the left and right turns moved the motor the same way; turn left first, then right")
   span = abs(left_deg - right_deg) * angle_scale
@@ -813,8 +813,8 @@ def motor_push_agrees(direction: int, angle_before: float, angle_after: float, m
 
 MOTOR_STATUS_ADDR = 0x22F
 MSG_NO_MOTOR_IN_DRIVE = " ".join((
-  "the motor wasn't heard during the drive: drive with the lift lever down",
-  "(lane keeping stays off until this check passes)",
+  "the motor wasn't heard during the drive: check that the lights on its board come on with the car and that its",
+  "cable is plugged in, then drive again with its gear in the teeth (lane keeping stays off until this check passes)",
 ))
 
 
@@ -859,7 +859,7 @@ def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: S
                                direction: int, angle_scale: float, min_speed: float = 8.0, min_turn_deg_s: float = 2.0,
                                min_steer_deg: float = 0.5, min_samples: int = 20) -> MotorCheck:
   """Checks the saved motor direction against the car's own turning, with nothing from the person doing the setup.
-  During a drive with the lift lever down and lane keeping off, the motor's angle follows the steering wheel. When
+  During a drive with the motor gear in the teeth and lane keeping off, the motor's angle follows the steering wheel. When
   the GPS course swings left, the steering wheel must be left of where it sits on straight road, and the saved
   direction must make that read as left (positive).
   motor: (seconds, motor angle in firmware degrees). headings: (seconds, GPS course in degrees clockwise from north,
@@ -879,7 +879,7 @@ def motor_direction_from_drive(motor: Sequence[tuple[float, float]], headings: S
     detail = f"the motor reads the steering wheel the opposite way to how the car turned ({1 - share:.0%} of {total})"
     return MotorCheck(False, f"{detail}: its saved direction is wrong. Run part 1 again", direction, wrong_way=True)
   detail = f"the steering wheel and the car's turning didn't line up clearly ({share:.0%} of {total})"
-  return MotorCheck(False, f"{detail}: drive again with the lift lever down", direction)
+  return MotorCheck(False, f"{detail}: drive again with the motor's gear in the teeth", direction)
 
 
 def angle_direction_from_drive(cfg: Config, frames: Sequence[Frame], headings: Sequence[tuple[float, float, float]],

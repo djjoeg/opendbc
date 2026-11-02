@@ -230,7 +230,7 @@ class TestDriveDirection(unittest.TestCase):
     _, headings = turning_drive(300.0)
     c = dsc.motor_direction_from_drive([], headings, 1, 1.0)
     self.assertFalse(c.ok)
-    self.assertIn("lift lever down", c.detail)
+    self.assertIn("lights on its board", c.detail)
     motor, headings = turning_drive(300.0, turning=False)
     c = dsc.motor_direction_from_drive(motor, headings, 1, 1.0)
     self.assertFalse(c.ok)

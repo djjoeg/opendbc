@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import functools
 import json
 import os
 import struct
@@ -205,16 +206,20 @@ class TestConfig(unittest.TestCase):
 
   def test_scales(self):
     a = CONFIG.actuator
-    # the firmware default (5.18:1 gearbox x 2, 39 Ncm 1.3 A motor) driving the 45 Ncm 2 A motor through the 197:19
-    # printed gears: the firmware needs 1.33 times the torque asked at the steering wheel
-    self.assertAlmostEqual(a.torque_cmd_scale, 1.333, delta=0.005)
+    # the firmware default (5.18:1 gearbox x 2, 39 Ncm 1.3 A motor) driving the 45 Ncm 1.5 A motor (the same torque per
+    # amp) through the 197:19 printed gears: a firmware unit is a unit at the steering wheel
+    self.assertAlmostEqual(a.torque_cmd_scale, 1.0, delta=0.005)
     # lane keeping's own most and the panda's limit, at the steering wheel
     params = CarControllerParams(None)
-    self.assertEqual(params.STEER_MAX, 41)
-    self.assertAlmostEqual(params.STEER_MAX * 0.125 / a.torque_cmd_scale, 3.85, delta=0.01)
+    self.assertEqual(params.STEER_MAX, 31)
+    self.assertAlmostEqual(params.STEER_MAX * 0.125 / a.torque_cmd_scale, 3.88, delta=0.01)
+    # and in the motor: at most 1.8 A from lane keeping, 2.0 A at the panda's limit (the motor is rated 1.5 A)
+    amps = 0.125 / (a.firmware_gearing_ratio * a.firmware_k_torque)
+    self.assertAlmostEqual(params.STEER_MAX * amps, 1.76, delta=0.01)
+    self.assertAlmostEqual(CarControllerParams.SAFETY_MAX_TORQUE * amps, 1.99, delta=0.01)
     # the grip test's push (the board's 3.3 A) is at least 1.4 times lane keeping's most
     self.assertGreaterEqual(3.3 * a.motor_k_torque * a.mechanical_ratio / (params.STEER_MAX * 0.125 / a.torque_cmd_scale), 1.4)
-    self.assertAlmostEqual(CarControllerParams.SAFETY_MAX_TORQUE * 0.125 / a.torque_cmd_scale, 4.41, delta=0.01)
+    self.assertAlmostEqual(CarControllerParams.SAFETY_MAX_TORQUE * 0.125 / a.torque_cmd_scale, 4.38, delta=0.01)
     self.assertAlmostEqual(a.angle_scale, a.firmware_gearing_ratio / a.mechanical_ratio)
 
 
@@ -300,6 +305,20 @@ def lat_active_cc(torque: float):
   CC.latActive = True
   CC.actuators.torque = torque
   return CC
+
+
+def find_teeth(h: HondaStepperHarness, step=None, **kw):
+  """The steering wheel turns the motor a little, as it does as soon as the car moves with the motor gear in the
+  teeth: lane keeping may push 1 s later. Until then the car port holds it back, since the motor has power whenever
+  the car is on and its gear may be out of the teeth."""
+  p = CarControllerParams
+  step = step or h.step
+  step(**kw)                                       # the motor's first message: where it stands
+  h.status["STEERING_ANGLE"] += 2.0 * p.FREE_SPIN_REMESH_DEG / CONFIG.actuator.angle_scale
+  for _ in range(p.FREE_SPIN_HOLD_FRAMES + 2):
+    CS, sends = step(**kw)
+  assert not h.CI.CS.motor_free_spin
+  return CS, sends
 
 
 class TestCarState(CarNetworkTest):
@@ -455,6 +474,7 @@ class TestCarState(CarNetworkTest):
     fast = (p.FREE_SPIN_RATE_DEG_S + 30.0) / 360.0 / scale   # turns per second, as the motor counts them
     for direction in (1, -1):
       h = HondaStepperHarness(direction)
+      find_teeth(h)
       # these are not free spin: turning against the push (the driver), slower than the limit, or not pushing at all
       for torque, rev_s in ((1.0, -fast), (1.0, 0.5 * fast), (0.0, fast), (0.0, 1.9)):
         h.status.update(STEERING_TORQUE=torque)
@@ -497,6 +517,7 @@ class TestCarState(CarNetworkTest):
     p = CarControllerParams
     for rev_s in (2.8, 3.9, 1.0):
       h = HondaStepperHarness()
+      find_teeth(h)
       h.status.update(STEERING_TORQUE=1.0)
       h.turning(rev_s)
       CS, _ = h.step()
@@ -529,9 +550,12 @@ class TestCarState(CarNetworkTest):
     h.step()
     self.assertAlmostEqual(h.CI.CS.motor_rate_fw, 180.0, delta=13.0)   # the angle field counts in 0.125 degrees
 
-  def test_free_spin_retries_after_10_s_and_lever_up_resets(self):
+  def test_free_spin_holds_until_the_wheel_turns_the_motor(self):
+    # the gear off the teeth (past their end, or the motor slid back out of them): lane keeping holds back for as
+    # long as the steering wheel doesn't turn the motor. No retries, which would spin the motor again and chime.
     p = CarControllerParams
     h = HondaStepperHarness()
+    find_teeth(h)
     h.status.update(STEERING_TORQUE=1.0)
     h.turning(1.0)
     for _ in range(p.FREE_SPIN_FRAMES + 1):
@@ -539,22 +563,39 @@ class TestCarState(CarNetworkTest):
     self.assertTrue(h.CI.CS.motor_free_spin)
     h.status.update(STEERING_TORQUE=0.0)
     h.turning(0.0)
-    for _ in range(p.FREE_SPIN_REST_FRAMES + p.FREE_SPIN_RETRY_FRAMES + 2):
+    for _ in range(6000):                  # a minute
       CS, _ = h.step()
-    self.assertFalse(CS.steeringPressed)   # nothing seen of the teeth for 10 s: lane keeping may try again
-    # caught again, then the lift lever goes up and down: the gear was put back on the teeth by hand
-    h.status.update(STEERING_TORQUE=1.0)
-    h.turning(1.0)
-    for _ in range(p.FREE_SPIN_FRAMES + 1):
-      h.step()
-    self.assertTrue(h.CI.CS.motor_free_spin)
+      self.assertTrue(CS.steeringPressed)
+      self.assertFalse(CS.steerFaultTemporary)
+    # the car switched off and on again: still nothing pushes until the steering wheel turns the motor
     for _ in range(12):
       h.step(motor=False)
-    h.status.update(STEERING_TORQUE=0.0)
-    h.turning(0.0)
-    CS, _ = h.step()
-    self.assertFalse(h.CI.CS.motor_free_spin)
+    for _ in range(500):
+      CS, _ = h.step()
+      self.assertTrue(CS.steeringPressed)
+    CS, _ = find_teeth(h)
     self.assertFalse(CS.steeringPressed)
+
+  def test_motor_coming_on_waits_for_the_steering_wheel(self):
+    # the motor has power whenever the car is on, and its gear may be slid out of the teeth (lane keeping off): after
+    # it comes on, lane keeping holds back, quietly, until the steering wheel has turned the motor
+    p = CarControllerParams
+    for gear_in in (False, True):
+      h = HondaStepperHarness()
+      for _ in range(1000):
+        CS, sends = h.step(CC=lat_active_cc(1.0))
+        self.assertTrue(CS.steeringPressed)
+        self.assertFalse(CS.steerFaultTemporary)
+        self.assertTrue(all((dat[1] >> 4) & 0x3 == StepperMode.OFF for _, dat, _ in sends))
+      if gear_in:
+        h.status["STEERING_ANGLE"] += 2.0 * p.FREE_SPIN_REMESH_DEG / CONFIG.actuator.angle_scale
+        for _ in range(p.FREE_SPIN_HOLD_FRAMES):      # 1 s more
+          CS, _ = h.step(CC=lat_active_cc(1.0))
+          self.assertTrue(CS.steeringPressed)
+        CS, sends = h.step(CC=lat_active_cc(1.0))
+        CS, sends2 = h.step(CC=lat_active_cc(1.0))
+        self.assertFalse(CS.steeringPressed)
+        self.assertTrue(any((dat[1] >> 4) & 0x3 == StepperMode.TORQUE_CONTROL for _, dat, _ in sends + sends2))
 
   def test_angle_and_torque_scaling(self):
     for direction in (1, -1):
@@ -620,6 +661,7 @@ class TestCarController(CarNetworkTest):
 
   def test_ramps_and_rate(self):
     h = HondaStepperHarness()
+    find_teeth(h)
     params = CarControllerParams(h.CP)
     commanded = []
     for frame in range(200):
@@ -637,6 +679,7 @@ class TestCarController(CarNetworkTest):
 
   def test_waits_for_motor_torque(self):
     h = HondaStepperHarness()
+    find_teeth(h)
     params = CarControllerParams(h.CP)
     h.status["STEERING_TORQUE"] = 0.0  # motor not following
     last = 0
@@ -648,6 +691,7 @@ class TestCarController(CarNetworkTest):
 
   def test_disengage_releases_immediately(self):
     h = HondaStepperHarness()
+    find_teeth(h)
     for _ in range(40):
       h.status["STEERING_TORQUE"] = h.CI.CC.apply_torque_last * TORQUE_UNIT
       h.step(CC=lat_active_cc(1.0))
@@ -667,6 +711,7 @@ class TestCarController(CarNetworkTest):
 
   def test_free_spin_turns_motor_off(self):
     h = HondaStepperHarness()
+    find_teeth(h)
     p = CarControllerParams
     h.status.update(STEERING_TORQUE=1.0)   # pushing left ...
     h.turning(1.0)                         # ... and spinning left at 360 degrees per second
@@ -690,7 +735,7 @@ class TestCarController(CarNetworkTest):
   def test_direction(self):
     for direction in (1, -1):
       h = HondaStepperHarness(direction)
-      h.step()
+      find_teeth(h)
       _, sends = h.step(CC=lat_active_cc(1.0))
       sends += h.step(CC=lat_active_cc(1.0))[1]
       torques = [t for _, t in self._commands(sends)]
@@ -711,8 +756,19 @@ class TestWithSimMotor(CarNetworkTest):
       states.append(CS)
     return states
 
+  def _find_teeth(self, h: HondaStepperHarness, motor: SimMotor):
+    """The driver turns the wheel a little and back: the teeth turn the motor, and lane keeping may push 1 s later."""
+    idle = structs.CarControl()
+    self._run(h, motor, idle, 0.1)
+    motor.turn_wheel(motor.wheel_deg + 3.0)
+    self._run(h, motor, idle, 0.1)
+    motor.turn_wheel(motor.wheel_deg - 3.0)
+    self._run(h, motor, idle, 1.1)
+    self.assertFalse(h.CI.CS.motor_free_spin)
+
   def test_lane_keeping_on_the_teeth_is_not_free_spin(self):
     h, motor = HondaStepperHarness(), SimMotor()
+    self._find_teeth(h, motor)
     states = self._run(h, motor, lat_active_cc(1.0), 1.0)
     self.assertFalse(any(cs.steeringPressed or cs.steerFaultTemporary for cs in states[2:]))
     self.assertGreater(motor.wheel_deg, 10.0)   # lane keeping turned the wheel left
@@ -721,6 +777,7 @@ class TestWithSimMotor(CarNetworkTest):
 
   def test_motor_off_the_teeth_is_stopped(self):
     h, motor = HondaStepperHarness(), SimMotor()
+    self._find_teeth(h, motor)
     motor.wheel_deg = motor.teeth_center_deg + 50.0   # the driver turned the wheel past the end of the teeth
     states = self._run(h, motor, lat_active_cc(1.0), 0.5)
     # it spun for about 0.1 s before the car port turned it off, and stays off
@@ -750,6 +807,7 @@ class TestWithSimMotor(CarNetworkTest):
     # rate out from the angle, so it still catches the spin within about 0.1 s
     for fw_deg_s in (1000.0, 1400.0):
       h, motor = HondaStepperHarness(), SimMotor()
+      self._find_teeth(h, motor)
       motor.free_spin_fw_deg_s = fw_deg_s
       motor.wheel_deg = motor.teeth_center_deg + 50.0
       states = self._run(h, motor, lat_active_cc(1.0), 0.5)
@@ -758,20 +816,56 @@ class TestWithSimMotor(CarNetworkTest):
       self.assertEqual(motor.mode, StepperMode.OFF)
       self.assertTrue(states[-1].steeringPressed)
 
-  def test_one_hold_per_turn_then_a_retry_after_10_s(self):
+  def test_one_hold_per_turn_and_no_retries(self):
     h, motor = HondaStepperHarness(), SimMotor()
+    self._find_teeth(h, motor)
     motor.wheel_deg = motor.teeth_center_deg - 50.0
-    states = self._run(h, motor, lat_active_cc(-1.0), 12.0)
+    states = self._run(h, motor, lat_active_cc(-1.0), 30.0)
     held = [cs.steeringPressed for cs in states]
     starts = sum(1 for a, b in zip(held, held[1:], strict=False) if b and not a)
-    self.assertEqual(starts, 2)   # caught once, held 10 s, one retry
+    self.assertEqual(starts, 1)   # caught once, then held for as long as the wheel stays past the teeth
+    self.assertTrue(held[-1])
     self.assertFalse(any(cs.steerFaultTemporary for cs in states[2:]))
-    self.assertLess(motor.free_spin_deg, 2 * 0.2 * FREE_SPIN_FW_DEG_S)
+    self.assertLess(motor.free_spin_deg, 0.2 * FREE_SPIN_FW_DEG_S)
+
+  def test_gear_slid_out_of_the_teeth_never_pushes(self):
+    # lane keeping switched off the right-arm way: the motor slid back, its gear out of the teeth. The motor still
+    # has power and lane keeping is on, but it never pushes, so it never spins; the driver steers as he likes.
+    h, motor = HondaStepperHarness(), SimMotor()
+    motor.gear_in = False
+    states = self._run(h, motor, lat_active_cc(1.0), 0.1)
+    for target in (20.0, -20.0, 0.0):
+      motor.plan_turn(target, 20.0)
+      states += self._run(h, motor, lat_active_cc(1.0), 2.0)
+    states += self._run(h, motor, lat_active_cc(1.0), 30.0)
+    self.assertTrue(all(cs.steeringPressed and not cs.steerFaultTemporary for cs in states))
+    self.assertEqual(motor.mode, StepperMode.OFF)
+    self.assertEqual(motor.free_spin_deg, 0.0)
+    # slid in again: the first small turn of the wheel turns the motor, and lane keeping pushes 1 s later
+    motor.gear_in = True
+    self._find_teeth(h, motor)
+    states = self._run(h, motor, lat_active_cc(1.0), 0.5)
+    self.assertFalse(states[-1].steeringPressed)
+    self.assertEqual(motor.mode, StepperMode.TORQUE_CONTROL)
+    self.assertEqual(motor.free_spin_deg, 0.0)
+
+  def test_gear_slid_out_while_pushing_stops_once(self):
+    # slid out while lane keeping pushes: the motor spins for about 0.1 s, is caught, and stays off
+    h, motor = HondaStepperHarness(), SimMotor()
+    self._find_teeth(h, motor)
+    self._run(h, motor, lat_active_cc(1.0), 0.5)
+    motor.gear_in = False
+    states = self._run(h, motor, lat_active_cc(1.0), 20.0)
+    held = [cs.steeringPressed for cs in states]
+    self.assertEqual(sum(1 for a, b in zip(held, held[1:], strict=False) if b and not a), 1)
+    self.assertTrue(held[-1])
+    self.assertLess(motor.free_spin_deg, 0.2 * FREE_SPIN_FW_DEG_S)
 
   def test_fast_turn_by_the_driver_recovers(self):
     # the driver turns the wheel fast the same way lane keeping pushes: that looks like free spin, so the motor is
     # turned off, and lane keeping steers again about 1 s after the driver's next small correction
     h, motor = HondaStepperHarness(), SimMotor()
+    self._find_teeth(h, motor)
     self._run(h, motor, lat_active_cc(1.0), 0.5)
     for _ in range(15):                       # 130 degrees per second to the left for 0.15 s, staying on the teeth
       motor.turn_wheel(motor.wheel_deg + 1.3, steps=1)
@@ -893,6 +987,7 @@ class TestStandalone(unittest.TestCase):
   def test_the_wheel_turned_against_the_motor_lets_it_go(self):
     p = CarControllerParams
     h = HondaStepperHarness()
+    find_teeth(h, step=functools.partial(self._step, h))
     self._override_run(h, 4.0, 0.0, 50)
     # the motor pushes left (4 Nm in firmware units, over the share); the driver turns right at 30 deg/s
     states = self._override_run(h, 4.0, -0.3, p.OVERRIDE_FRAMES + 2)
@@ -919,12 +1014,14 @@ class TestStandalone(unittest.TestCase):
     for torque, rate, what in cases:
       with self.subTest(what):
         h = HondaStepperHarness()
+        find_teeth(h, step=functools.partial(self._step, h))
         states = self._override_run(h, torque, rate, p.OVERRIDE_FRAMES * 5)
         self.assertFalse(any(cs.steeringPressed for cs, _ in states))
 
   def test_override_is_standalone_only(self):
     with variant(raw_car_network()) as (cfg, dbc_path):
       h = HondaStepperHarness(fcan_dbc=dbc_path, cfg=cfg)
+      find_teeth(h)
       h.status["STEERING_TORQUE"] = 4.0
       for _ in range(60):
         h.status["STEERING_ANGLE"] -= 0.3

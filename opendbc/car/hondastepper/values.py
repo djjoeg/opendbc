@@ -44,25 +44,32 @@ class StepperDebugStates(IntFlag):
 
 
 class CarControllerParams:
-  # Torque values are CAN units of the motor command: 0.125 Nm at the gearing the motor firmware assumes.
-  # The panda safety mode (opendbc/safety/modes/honda_stepper.h) enforces the same numbers.
+  # Torque values are CAN units of the motor command: 0.125 Nm at the gearing the motor firmware assumes. With the
+  # 45 Ncm 1.5 A motor (the same torque per amp as the firmware's own) and the printed gears that is 0.125 Nm at the
+  # steering wheel too. The panda safety mode (opendbc/safety/modes/honda_stepper.h) enforces the same numbers.
   STEER_STEP = 2            # one command every 20 ms; the motor soft-offs after 60 ms without one
   STEER_DELTA_UP = 1        # per command: 6.25 Nm/s
   STEER_DELTA_DOWN = 2      # per command: 12.5 Nm/s
   STEER_ERROR_MAX = 8       # 1 Nm the command may run ahead of the torque the motor reports
   # lane keeping's most at the steering wheel; one hand overpowers it easily. The car setup's grip test pushes with the
-  # most the motor's board gives (about 5.4 Nm), 1.41 times this, so passing it proves the motor gear stays in the teeth
+  # most the motor's board gives (3.3 A: about 7.3 Nm with the 45 Ncm 1.5 A motor), 1.9 times this, so passing it
+  # proves the motor gear stays in the teeth
   STEER_MAX_WHEEL_NM = 3.85
-  SAFETY_MAX_TORQUE = 47    # the panda's hard limit: 5.9 Nm in firmware units, 4.4 Nm at the steering wheel
-  MOTOR_TIMEOUT_NS = 100_000_000  # treat the motor as gone (lift lever up) after 100 ms without status
+  SAFETY_MAX_TORQUE = 35    # the panda's hard limit: 4.4 Nm at the steering wheel (2.0 A in the motor)
+  MOTOR_TIMEOUT_NS = 100_000_000  # treat the motor as gone (no power, or unplugged) after 100 ms without status
   # lane keeping turns on after this many motor status messages without a 100 ms gap, each saying the motor's
   # controller runs: 2 s at 100 Hz. The panda's safety mode uses the same count (HONDA_STEPPER_LEVER_DOWN_MSGS).
+  # "The lift lever" in this port is whatever switches the motor's power: the lever on the earlier mounts; on the
+  # right-arm mount the motor has power whenever the car is on, and lane keeping pushes only while its gear is in the
+  # teeth (carstate's free spin states).
   LEVER_DOWN_MSGS = 200
 
-  # Free spin: the steering wheel is turned further than the steering wheel teeth reach, so the motor gear is off
-  # them and spins freely in the direction it pushes. On the teeth the motor turns only as fast as the steering
-  # wheel, and lane keeping alone turns the wheel well under this rate. The motor is then kept off, silently, until
-  # its gear is back on the teeth. Not measured on the car yet.
+  # Free spin: the steering wheel is turned further than the steering wheel teeth reach, or the motor is slid back
+  # out of them, so the motor gear is off them and spins freely in the direction it pushes. In the teeth the motor
+  # turns only as fast as the steering wheel, and lane keeping alone turns the wheel well under this rate. The motor
+  # is then kept off, silently, until the steering wheel turns it again (its gear is back in the teeth); the same
+  # after the motor comes on, since its gear may be out of the teeth then (lane keeping switched off). Not measured
+  # on the car yet.
   # Rates are steering wheel degrees per second, worked out from the motor's angle between two of its status
   # messages (its speed field is 8 bits and wraps above 2 turns a second, which a spinning motor may well pass; the
   # angle field only wraps after 11 turns, and that wrap is undone). Frames are 10 ms status messages.
@@ -74,7 +81,6 @@ class CarControllerParams:
   # the stopped motor then turning this far means the steering wheel turns it again: its gear is back on the teeth
   FREE_SPIN_REMESH_DEG = 1.0
   FREE_SPIN_HOLD_FRAMES = 100      # the motor stays off for 1 s after that
-  FREE_SPIN_RETRY_FRAMES = 1000    # with no sign of the teeth for 10 s, let lane keeping try again
 
   # Stand-alone there are no turn signals or brake to pause lane keeping, so the motor lets go when the driver turns
   # the wheel against it: the motor pushing hard one way (a share of lane keeping's most) while the steering wheel
